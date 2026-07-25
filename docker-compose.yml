@@ -70,6 +70,10 @@ services:
     # for the web service and would not give the bot internet access.
     build: .
     entrypoint: ["/bot"]
+    # The image HEALTHCHECK probes :3329/healthz, which only the web service
+    # serves — the bot has no HTTP listener, so it would always read "unhealthy".
+    healthcheck:
+      disable: true
     restart: unless-stopped
     # matrix.env (gitignored) supplies MATRIX_HOMESERVER/USER/PASSWORD + REGISTER_URL
     # and MATRIX_ROOM, which doubles as the default ANNOUNCE_ROOM (the channel new

@@ -80,9 +80,10 @@ type Client struct {
 	now func() time.Time
 
 	// mu guards the anti-spam maps below.
-	mu       sync.Mutex
-	dmRooms  map[string]string    // handle -> cached DM room id (reused across commands)
-	lastSeen map[string]time.Time // handle -> last acted-on "!start" time
+	mu        sync.Mutex
+	dmRooms   map[string]string    // handle -> cached DM room id (reused across commands)
+	lastSeen  map[string]time.Time // handle -> last acted-on "!start" time
+	warnedEnc map[string]bool      // roomID -> already logged an "encrypted, unreadable" warning
 
 	// lastAnnounced is the highest registration id already announced. It is
 	// persisted with the DM cache so a restart does not re-announce.
@@ -150,10 +151,21 @@ func (c *Client) Run(ctx context.Context) error {
 				continue
 			}
 			for _, ev := range room.Timeline.Events {
+				if ev.Sender == c.Self {
+					continue
+				}
+				// The bot has no E2EE support: an encrypted room's messages
+				// arrive as m.room.encrypted with no readable body, so any
+				// "!start" there is invisible. Element encrypts DMs by default,
+				// so warn (once per room) instead of silently doing nothing.
+				if ev.Type == "m.room.encrypted" {
+					c.warnEncrypted(roomID)
+					continue
+				}
 				if ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" {
 					continue
 				}
-				if ev.Sender == c.Self || !isStartCmd(ev.Content.Body) {
+				if !isStartCmd(ev.Content.Body) {
 					continue
 				}
 				log.Printf("!start from %s in %s", ev.Sender, roomID)
@@ -162,6 +174,25 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 			}
 		}
+	}
+}
+
+// warnEncrypted logs, once per room, that the bot received an event it cannot
+// read because the room is end-to-end encrypted. The bot has no E2EE support,
+// so "!start" sent in an encrypted room (e.g. an Element-default encrypted DM)
+// is invisible to it. Surfacing this in the logs turns a silent no-op into a
+// diagnosable cause.
+func (c *Client) warnEncrypted(roomID string) {
+	c.mu.Lock()
+	if c.warnedEnc == nil {
+		c.warnedEnc = make(map[string]bool)
+	}
+	already := c.warnedEnc[roomID]
+	c.warnedEnc[roomID] = true
+	c.mu.Unlock()
+	if !already {
+		log.Printf("cannot read %s: it is end-to-end encrypted and the bot has no E2EE support "+
+			"— users must send !start in an unencrypted room", roomID)
 	}
 }
 
