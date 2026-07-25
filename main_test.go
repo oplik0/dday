@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -12,6 +13,30 @@ import (
 
 	"github.com/d33mobile/dday/internal/matrixbot"
 )
+
+// botTransport is a minimal in-memory matrixbot transport (implementing the
+// package's unexported matrixOps interface structurally) for the cross-component
+// e2e below: it captures the plain body the bot delivers so the test can drive
+// the bot's ACTUAL emitted link through the real web handlers.
+type botTransport struct{ sent chan string }
+
+func (b *botTransport) Self() string { return "@ddaybot:mock" }
+func (b *botTransport) SendHTML(_ context.Context, _, plain, _ string) error {
+	select {
+	case b.sent <- plain:
+	default:
+	}
+	return nil
+}
+func (b *botTransport) CreateDM(context.Context, string) (string, error) { return "!dm:mock", nil }
+func (b *botTransport) JoinRoom(context.Context, string) error           { return nil }
+func (b *botTransport) JoinedMembers(context.Context, string) (map[string]struct{}, error) {
+	return map[string]struct{}{"@ddaybot:mock": {}, "@a:mock": {}, "@b:mock": {}}, nil
+}
+func (b *botTransport) GetDirect(context.Context) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+func (b *botTransport) SetDirect(context.Context, map[string][]string) error { return nil }
 
 func TestRegisterGetShowsForm(t *testing.T) {
 	e := newTestEnv(t, true, 20)
@@ -396,41 +421,23 @@ func TestRegisterFlowBotToWeb(t *testing.T) {
 	// Web side: real handler + store, with an ephemeral keypair.
 	e := newTestEnv(t, true, 20)
 
-	// Mock Matrix homeserver to receive the bot's createRoom + send.
-	sent := make(chan string, 1)
-	mm := http.NewServeMux()
-	mm.HandleFunc("/_matrix/client/v3/createRoom", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"room_id":"!dm:mock"}`))
-	})
-	mm.HandleFunc("/_matrix/client/v3/rooms/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/send/") {
-			var body struct {
-				Body string `json:"body"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			sent <- body.Body
-		}
-		_, _ = w.Write([]byte(`{"event_id":"$e"}`))
-	})
-	ms := httptest.NewServer(mm)
-	defer ms.Close()
-
 	// Bot side: real Client encrypting to the SAME recipient the web decrypts.
-	bot := matrixbot.New(ms.URL)
-	bot.Token = "tok"
+	// A local fake Matrix transport captures the message the bot delivers.
+	fake := &botTransport{sent: make(chan string, 1)}
+	bot := matrixbot.New(fake)
 	bot.Recipient = e.recipient
 	bot.LinkBase = "https://dday.hs-ldz.pl/register"
 	bot.TokenSecret = testTokenSecret // same shared secret the web mux verifies with
 
-	// Empty origin room: the bot DMs the link, and skips the public nudge (the
-	// mock has no channel to nudge here).
-	if _, err := bot.HandleRegister("", "@alice:hs.org"); err != nil {
+	// Empty origin room: the bot DMs the link, and skips the public nudge (there
+	// is no channel to nudge here).
+	if _, err := bot.HandleRegister(context.Background(), "", "@alice:hs.org"); err != nil {
 		t.Fatalf("bot HandleRegister: %v", err)
 	}
 
 	var msg string
 	select {
-	case msg = <-sent:
+	case msg = <-fake.sent:
 	case <-time.After(3 * time.Second):
 		t.Fatal("bot did not send a message")
 	}

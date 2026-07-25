@@ -1,12 +1,9 @@
 package matrixbot
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestIsStartCmd pins down which messages trigger the bot: "!start" is the
@@ -49,57 +46,15 @@ func TestIsStartCmd(t *testing.T) {
 func TestHandleRegisterAlreadyRegisteredSendsPanelLink(t *testing.T) {
 	recipient, identity := genKeypair(t)
 
-	type sendRec struct {
-		room string
-		body map[string]any
-	}
-	sends := make(chan sendRec, 4)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"access_token": "tok", "user_id": "@ddaybot:mock"})
-	})
-	mux.HandleFunc("/_matrix/client/v3/createRoom", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"room_id": "!dm:mock"})
-	})
-	mux.HandleFunc("/_matrix/client/v3/user/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			http.Error(w, `{"errcode":"M_NOT_FOUND"}`, http.StatusNotFound)
-			return
-		}
-		writeJSON(w, map[string]any{})
-	})
-	mux.HandleFunc("/_matrix/client/v3/rooms/", func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/send/"):
-			sends <- sendRec{room: roomFromPath(r.URL.Path), body: readJSON(t, r)}
-			writeJSON(w, map[string]any{"event_id": "$e"})
-		case strings.Contains(r.URL.Path, "/joined_members"):
-			// A three-member room, so the origin is never mistaken for a 1:1 DM
-			// and the public nudge branch stands.
-			writeJSON(w, map[string]any{"joined": map[string]any{
-				"@ddaybot:mock": map[string]any{},
-				"@alice:mock":   map[string]any{},
-				"@other:mock":   map[string]any{},
-			}})
-		default:
-			writeJSON(w, map[string]any{})
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := New(srv.URL)
+	f := newFakeOps()
+	c := New(f)
 	c.Recipient = recipient
 	c.LinkBase = "https://dday.hs-ldz.pl/register"
 	c.PanelBase = "https://dday.hs-ldz.pl/panel"
 	c.TokenSecret = testSecret
 	c.CheckRegistered = func(string) (int, bool, error) { return 7, true, nil }
-	if err := c.Login("@ddaybot:mock", "secret"); err != nil {
-		t.Fatalf("login: %v", err)
-	}
 
-	room, err := c.HandleRegister("!chan:mock", "@alice:mock")
+	room, err := c.HandleRegister(bg(), "!chan:mock", "@alice:mock")
 	if err != nil {
 		t.Fatalf("HandleRegister: %v", err)
 	}
@@ -107,37 +62,34 @@ func TestHandleRegisterAlreadyRegisteredSendsPanelLink(t *testing.T) {
 		t.Errorf("HandleRegister returned room %q; want the DM room", room)
 	}
 
-	var dm, nudge sendRec
-	for i := 0; i < 2; i++ {
-		select {
-		case s := <-sends:
-			if s.room == "!chan:mock" {
-				nudge = s
-			} else {
-				dm = s
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("timed out waiting for send %d/2", i+1)
+	var dm, nudge recordedSend
+	for _, s := range f.sentMessages() {
+		if s.room == "!chan:mock" {
+			nudge = s
+		} else {
+			dm = s
 		}
+	}
+	if dm.room == "" || nudge.room == "" {
+		t.Fatalf("expected both a DM and a nudge; got %+v", f.sentMessages())
 	}
 
 	// The DM carries the panel magic link and (privately) the participant number.
-	db, _ := dm.body["body"].(string)
-	if !strings.Contains(db, "https://dday.hs-ldz.pl/panel?t=") {
-		t.Fatalf("dm body = %q; want a /panel?t= magic link", db)
+	if !strings.Contains(dm.plain, "https://dday.hs-ldz.pl/panel?t=") {
+		t.Fatalf("dm body = %q; want a /panel?t= magic link", dm.plain)
 	}
-	if !strings.Contains(db, "#7") {
-		t.Errorf("dm body = %q; want the participant number", db)
+	if !strings.Contains(dm.plain, "#7") {
+		t.Errorf("dm body = %q; want the participant number", dm.plain)
 	}
-	if strings.Contains(db, "nie jest możliwa") {
-		t.Errorf("dm body = %q; must not be the old refusal", db)
+	if strings.Contains(dm.plain, "nie jest możliwa") {
+		t.Errorf("dm body = %q; must not be the old refusal", dm.plain)
 	}
-	if df, _ := dm.body["formatted_body"].(string); !strings.Contains(df, `<a href="https://dday.hs-ldz.pl/panel?t=`) {
-		t.Errorf("dm formatted_body = %q; want an <a href> to the panel", df)
+	if !strings.Contains(dm.html, `<a href="https://dday.hs-ldz.pl/panel?t=`) {
+		t.Errorf("dm formatted_body = %q; want an <a href> to the panel", dm.html)
 	}
 
 	// The token in that link must be a panel token for exactly this handle.
-	payload, err := DecodeRegToken(identity, testSecret, tokenFromLink(t, db))
+	payload, err := DecodeRegToken(identity, testSecret, tokenFromLink(t, dm.plain))
 	if err != nil {
 		t.Fatalf("DecodeRegToken: %v", err)
 	}
@@ -149,18 +101,17 @@ func TestHandleRegisterAlreadyRegisteredSendsPanelLink(t *testing.T) {
 	}
 
 	// The channel gets a nudge only: no link, no participant number.
-	nb, _ := nudge.body["body"].(string)
-	if !strings.Contains(nb, "sprawdź prywatne wiadomości") {
-		t.Errorf("nudge body = %q; want 'sprawdź prywatne wiadomości'", nb)
+	if !strings.Contains(nudge.plain, "sprawdź prywatne wiadomości") {
+		t.Errorf("nudge body = %q; want 'sprawdź prywatne wiadomości'", nudge.plain)
 	}
-	if !strings.Contains(nb, "link do Twojego panelu") {
-		t.Errorf("nudge body = %q; want it to mention the panel link", nb)
+	if !strings.Contains(nudge.plain, "link do Twojego panelu") {
+		t.Errorf("nudge body = %q; want it to mention the panel link", nudge.plain)
 	}
-	if strings.Contains(nb, "?t=") || strings.Contains(nb, "#7") {
-		t.Errorf("nudge body = %q; must leak neither the link nor the number", nb)
+	if strings.Contains(nudge.plain, "?t=") || strings.Contains(nudge.plain, "#7") {
+		t.Errorf("nudge body = %q; must leak neither the link nor the number", nudge.plain)
 	}
-	if nf, _ := nudge.body["formatted_body"].(string); strings.Contains(nf, "?t=") {
-		t.Errorf("nudge formatted_body = %q; must NOT contain the magic link", nf)
+	if strings.Contains(nudge.html, "?t=") {
+		t.Errorf("nudge formatted_body = %q; must NOT contain the magic link", nudge.html)
 	}
 }
 

@@ -17,9 +17,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Also build the Matrix bot — a separate long-lived process. Both binaries ship
 # in the final image; compose picks which one runs per service via entrypoint.
 # It reuses the same cached build artifacts (modernc already compiled above).
+# `-tags goolm` selects pure-Go olm/megolm so the bot can read and answer in
+# end-to-end encrypted rooms while still linking statically at CGO_ENABLED=0
+# (without the tag mautrix pulls in libolm via cgo and would not link).
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bot ./cmd/bot
+    CGO_ENABLED=0 GOOS=linux go build -tags goolm -trimpath -ldflags="-s -w" -o /bot ./cmd/bot
 # Stage the DB directory here so it can be copied with nonroot ownership below;
 # the distroless image has no shell to mkdir/chown at build time.
 RUN mkdir -p /data

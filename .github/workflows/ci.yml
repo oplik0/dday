@@ -22,14 +22,23 @@ jobs:
             echo "These files are not gofmt-ed:"; echo "$out"; exit 1
           fi
 
+      # The bot uses mautrix with pure-Go olm/megolm, selected by -tags goolm;
+      # everything below runs with the tag so the bot's E2EE code path is
+      # vetted/built/tested. The tag is inert for the web/store/regwindow
+      # packages, which do not import mautrix.
       - name: go vet
-        run: go vet ./...
+        run: go vet -tags goolm ./...
 
-      - name: build
+      - name: build (goolm)
+        run: go build -tags goolm ./...
+
+      # Sanity: the tag-free build must also compile (the bot then falls back to
+      # the stub main that refuses to run without E2EE).
+      - name: build (no tag)
         run: go build ./...
 
       - name: test (race)
-        run: go test -race ./...
+        run: go test -race -tags goolm ./...
 
   docker:
     runs-on: ubuntu-latest

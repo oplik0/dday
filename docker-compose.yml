@@ -87,6 +87,15 @@ services:
       # the server) and the id of the last announced registration (so a restart
       # does not re-announce). /data is owned by nonroot (65532) in the image.
       DM_CACHE_PATH: /data/dm_cache.json
+      # Pure-Go SQLite crypto store on the volume: the bot's device identity and
+      # its megolm sessions live here, so a redeploy keeps reading/answering in
+      # encrypted rooms instead of re-registering a fresh, unverified device.
+      CRYPTO_DB_PATH: /data/crypto.db
+      # Encrypts the olm account at rest. `make up` writes a stable one into .env;
+      # it MUST stay constant across restarts (paired with the crypto volume) or
+      # the bot loses its device + sessions. Empty → the bot generates an
+      # ephemeral key and warns (a restart then loses all encrypted sessions).
+      CRYPTO_PICKLE_KEY: ${CRYPTO_PICKLE_KEY:-}
       # matrix.env also sets AGE_PUB=config/... — a host path that does not exist
       # inside the image. Override with the public key passed BY VALUE as base64;
       # the bot prefers AGE_PUB_DATA over AGE_PUB. `make up` writes it into .env.

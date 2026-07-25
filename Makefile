@@ -34,6 +34,9 @@ up: ## Start via docker compose (Traefik on dday.hs-ldz.pl)
 	 adm=$$(grep -E '^ADMIN_TOKEN=' .env 2>/dev/null | head -n1 | cut -d= -f2-); \
 	 if [ -z "$$adm" ]; then adm=$$(openssl rand -hex 32); echo "generated new ADMIN_TOKEN"; \
 	 else echo "reusing existing ADMIN_TOKEN from .env"; fi; \
+	 pk=$$(grep -E '^CRYPTO_PICKLE_KEY=' .env 2>/dev/null | head -n1 | cut -d= -f2-); \
+	 if [ -z "$$pk" ]; then pk=$$(openssl rand -hex 32); echo "generated new CRYPTO_PICKLE_KEY"; \
+	 else echo "reusing existing CRYPTO_PICKLE_KEY from .env"; fi; \
 	 ro=$$(grep -E '^REGISTRATION_OPEN=' .env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '[:space:]'); \
 	 if [ -z "$$ro" ]; then echo "REGISTRATION_OPEN left empty — registration opens AUTOMATICALLY at REGISTRATION_OPEN_AT"; \
 	 else echo "reusing explicit REGISTRATION_OPEN=$$ro from .env (operator override)"; fi; \
@@ -49,8 +52,12 @@ up: ## Start via docker compose (Traefik on dday.hs-ldz.pl)
 	   printf 'TOKEN_SECRET=%s\n' "$$sec"; \
 	   printf '# ADMIN_TOKEN guards the read-only admin view: https://dday.hs-ldz.pl/admin?t=<ADMIN_TOKEN>\n'; \
 	   printf '# The URL contains a secret — do not paste it publicly. Empty = /admin disabled (404).\n'; \
-	   printf 'ADMIN_TOKEN=%s\n' "$$adm"; } > .env
-	@echo "wrote .env (REGISTRATION_OPEN + AGE_KEY_DATA + AGE_PUB_DATA + INTERNAL_TOKEN + TOKEN_SECRET + ADMIN_TOKEN)"
+	   printf 'ADMIN_TOKEN=%s\n' "$$adm"; \
+	   printf '# CRYPTO_PICKLE_KEY encrypts the bot olm account at rest. Keep it STABLE:\n'; \
+	   printf '# with the persistent crypto volume it keeps the bot device + megolm\n'; \
+	   printf '# sessions across restarts. Changing/losing it re-registers the device.\n'; \
+	   printf 'CRYPTO_PICKLE_KEY=%s\n' "$$pk"; } > .env
+	@echo "wrote .env (REGISTRATION_OPEN + AGE_KEY_DATA + AGE_PUB_DATA + INTERNAL_TOKEN + TOKEN_SECRET + ADMIN_TOKEN + CRYPTO_PICKLE_KEY)"
 	@ro=$$(grep -E '^REGISTRATION_OPEN=' .env | head -n1 | cut -d= -f2- | tr -d '[:space:]'); \
 	 case "$$ro" in \
 	   "") echo "registration mode: AUTO — opens by itself at REGISTRATION_OPEN_AT (no override set)";; \
@@ -68,11 +75,11 @@ logs: ## Tail compose logs
 fmt: ## Format Go code
 	gofmt -w .
 
-vet: ## Run go vet
-	go vet ./...
+vet: ## Run go vet (with the bot's goolm E2EE build tag)
+	go vet -tags goolm ./...
 
-test: ## Run the full test suite (race detector)
-	go test -race ./...
+test: ## Run the full test suite (race detector, goolm E2EE build tag)
+	go test -race -tags goolm ./...
 
 tidy: ## Tidy modules
 	go mod tidy
@@ -93,4 +100,4 @@ matrix-send: check ## Send a custom message: make matrix-send MSG="..."
 	@MATRIX_ENV=$(MATRIX_ENV) ./scripts/send-matrix.sh "$(MSG)"
 
 bot: check-keys ## Run the !start bot (foreground)
-	@set -a; . ./$(MATRIX_ENV); set +a; go run ./cmd/bot
+	@set -a; . ./$(MATRIX_ENV); set +a; CGO_ENABLED=0 go run -tags goolm ./cmd/bot

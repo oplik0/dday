@@ -7,36 +7,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
 
 const announceRoom = "!home:mock"
 
-// announceClient wires a Client to a mock homeserver that records every sent
+// announceClient wires a Client to a fake transport that records every sent
 // message, with the announce feed stubbed by fetch.
-func announceClient(t *testing.T, fetch func(int) ([]NewRegistration, error)) (*Client, chan map[string]any) {
+func announceClient(t *testing.T, fetch func(int) ([]NewRegistration, error)) (*Client, *fakeOps) {
 	t.Helper()
-	created := make(chan map[string]any, 8)
-	sent := make(chan map[string]any, 8)
-	srv := newMockMatrix(t, created, sent)
-	t.Cleanup(srv.Close)
-
-	c := New(srv.URL)
-	c.Token = "tok"
-	c.Self = "@ddaybot:mock"
+	f := newFakeOps()
+	c := New(f)
 	c.AnnounceRoom = announceRoom
 	c.FetchNewRegistrations = fetch
-	return c, sent
+	return c, f
 }
 
-// drain collects everything queued on the send channel without blocking.
-func drain(sent chan map[string]any) []map[string]any {
-	var out []map[string]any
+// drain collects everything queued on the fake's send channel without blocking.
+func drain(f *fakeOps) []recordedSend {
+	var out []recordedSend
 	for {
 		select {
-		case m := <-sent:
+		case m := <-f.sendCh:
 			out = append(out, m)
 		default:
 			return out
@@ -44,30 +37,20 @@ func drain(sent chan map[string]any) []map[string]any {
 	}
 }
 
-func bodyOf(m map[string]any) string {
-	s, _ := m["body"].(string)
-	return s
-}
-
-func formattedOf(m map[string]any) string {
-	s, _ := m["formatted_body"].(string)
-	return s
-}
+func bodyOf(m recordedSend) string      { return m.plain }
+func formattedOf(m recordedSend) string { return m.html }
 
 // TestAnnounceOnceSendsNewRegistrations: with a baseline already established,
 // one cycle posts one message per new signup — a participant line and a
 // waiting-list line — advances lastAnnounced, and a second cycle with nothing
 // new sends nothing.
 func TestAnnounceOnceSendsNewRegistrations(t *testing.T) {
-	var mu sync.Mutex
 	regs := []NewRegistration{
 		{ID: 5, Handle: "@alice:hs.org", Nick: "alice", Rank: 1, Confirmed: true},
 		{ID: 6, Handle: "@bob:hs.org", Nick: "bob", Rank: 21, WaitlistPos: 1},
 	}
 	var calls []int
-	c, sent := announceClient(t, func(since int) ([]NewRegistration, error) {
-		mu.Lock()
-		defer mu.Unlock()
+	c, f := announceClient(t, func(since int) ([]NewRegistration, error) {
 		calls = append(calls, since)
 		var out []NewRegistration
 		for _, r := range regs {
@@ -81,10 +64,10 @@ func TestAnnounceOnceSendsNewRegistrations(t *testing.T) {
 	c.lastAnnounced = 4
 	c.baselined = true
 
-	if err := c.announceOnce(); err != nil {
+	if err := c.announceOnce(bg()); err != nil {
 		t.Fatalf("announceOnce: %v", err)
 	}
-	msgs := drain(sent)
+	msgs := drain(f)
 	if len(msgs) != 2 {
 		t.Fatalf("sent %d messages; want 2", len(msgs))
 	}
@@ -103,14 +86,12 @@ func TestAnnounceOnceSendsNewRegistrations(t *testing.T) {
 	}
 
 	// Second cycle: nothing new, nothing sent, and it asked from id 6.
-	if err := c.announceOnce(); err != nil {
+	if err := c.announceOnce(bg()); err != nil {
 		t.Fatalf("second announceOnce: %v", err)
 	}
-	if msgs := drain(sent); len(msgs) != 0 {
+	if msgs := drain(f); len(msgs) != 0 {
 		t.Errorf("second cycle sent %d messages; want 0", len(msgs))
 	}
-	mu.Lock()
-	defer mu.Unlock()
 	if len(calls) != 2 || calls[0] != 4 || calls[1] != 6 {
 		t.Errorf("fetch called with %v; want [4 6]", calls)
 	}
@@ -120,16 +101,16 @@ func TestAnnounceOnceSendsNewRegistrations(t *testing.T) {
 // the participant number/position. There is nowhere for an e-mail or city to
 // appear even if the feed ever regressed and sent them.
 func TestAnnounceOmitsPersonalData(t *testing.T) {
-	c, sent := announceClient(t, func(int) ([]NewRegistration, error) {
+	c, f := announceClient(t, func(int) ([]NewRegistration, error) {
 		return []NewRegistration{{ID: 2, Handle: "@alice:hs.org", Nick: "alice", Rank: 1, Confirmed: true}}, nil
 	})
 	c.lastAnnounced = 1
 	c.baselined = true
 
-	if err := c.announceOnce(); err != nil {
+	if err := c.announceOnce(bg()); err != nil {
 		t.Fatalf("announceOnce: %v", err)
 	}
-	msgs := drain(sent)
+	msgs := drain(f)
 	if len(msgs) != 1 {
 		t.Fatalf("sent %d messages; want 1", len(msgs))
 	}
@@ -152,7 +133,7 @@ func TestAnnounceOmitsPersonalData(t *testing.T) {
 // adopts the current maximum id.
 func TestAnnounceFirstRunBaselines(t *testing.T) {
 	fetched := 0
-	c, sent := announceClient(t, func(since int) ([]NewRegistration, error) {
+	c, f := announceClient(t, func(since int) ([]NewRegistration, error) {
 		fetched++
 		if since >= 3 {
 			return nil, nil
@@ -164,17 +145,17 @@ func TestAnnounceFirstRunBaselines(t *testing.T) {
 		}, nil
 	})
 
-	if err := c.announceOnce(); err != nil {
+	if err := c.announceOnce(bg()); err != nil {
 		t.Fatalf("baseline cycle: %v", err)
 	}
-	if msgs := drain(sent); len(msgs) != 0 {
+	if msgs := drain(f); len(msgs) != 0 {
 		t.Fatalf("baseline cycle sent %d messages; want 0 (no history replay)", len(msgs))
 	}
 	if c.lastAnnounced != 3 {
 		t.Errorf("lastAnnounced after baseline = %d; want 3", c.lastAnnounced)
 	}
 	// The next cycle announces normally.
-	if err := c.announceOnce(); err != nil {
+	if err := c.announceOnce(bg()); err != nil {
 		t.Fatalf("second cycle: %v", err)
 	}
 	if fetched != 2 {
@@ -194,20 +175,20 @@ func TestAnnouncePersistsLastAnnounced(t *testing.T) {
 		return []NewRegistration{{ID: 7, Handle: "@alice:hs.org", Confirmed: true}}, nil
 	}
 
-	first, sent := announceClient(t, feed)
+	first, f1 := announceClient(t, feed)
 	first.CachePath = path
 	first.lastAnnounced = 6
 	first.baselined = true
 	first.cacheDM("@alice:hs.org", "!dm:mock")
-	if err := first.announceOnce(); err != nil {
+	if err := first.announceOnce(bg()); err != nil {
 		t.Fatalf("first announceOnce: %v", err)
 	}
-	if msgs := drain(sent); len(msgs) != 1 {
+	if msgs := drain(f1); len(msgs) != 1 {
 		t.Fatalf("first run sent %d messages; want 1", len(msgs))
 	}
 
 	// A fresh Client on the same file resumes where the first left off.
-	second, sent2 := announceClient(t, feed)
+	second, f2 := announceClient(t, feed)
 	second.CachePath = path
 	n, err := second.LoadCache()
 	if err != nil {
@@ -219,10 +200,10 @@ func TestAnnouncePersistsLastAnnounced(t *testing.T) {
 	if second.lastAnnounced != 7 {
 		t.Fatalf("restored lastAnnounced = %d; want 7", second.lastAnnounced)
 	}
-	if err := second.announceOnce(); err != nil {
+	if err := second.announceOnce(bg()); err != nil {
 		t.Fatalf("second announceOnce: %v", err)
 	}
-	if msgs := drain(sent2); len(msgs) != 0 {
+	if msgs := drain(f2); len(msgs) != 0 {
 		t.Errorf("restarted bot re-announced %d message(s); want 0", len(msgs))
 	}
 }
@@ -241,7 +222,7 @@ func TestLoadCacheLegacyFlatFormat(t *testing.T) {
 		t.Fatalf("write legacy cache: %v", err)
 	}
 
-	c := New("http://unused")
+	c := New(newFakeOps())
 	c.CachePath = path
 	n, err := c.LoadCache()
 	if err != nil {
@@ -274,7 +255,7 @@ func TestLoadCacheLegacyFlatFormat(t *testing.T) {
 
 // TestAnnounceDisabled: no announce room (or no feed) means the cycle is inert.
 func TestAnnounceDisabled(t *testing.T) {
-	c, sent := announceClient(t, func(int) ([]NewRegistration, error) {
+	c, f := announceClient(t, func(int) ([]NewRegistration, error) {
 		t.Error("feed must not be queried when announcements are disabled")
 		return nil, nil
 	})
@@ -282,10 +263,10 @@ func TestAnnounceDisabled(t *testing.T) {
 	if c.announcementsEnabled() {
 		t.Fatal("announcementsEnabled with empty AnnounceRoom")
 	}
-	if err := c.announceOnce(); err != nil {
+	if err := c.announceOnce(bg()); err != nil {
 		t.Fatalf("announceOnce disabled: %v", err)
 	}
-	if msgs := drain(sent); len(msgs) != 0 {
+	if msgs := drain(f); len(msgs) != 0 {
 		t.Errorf("disabled bot sent %d messages; want 0", len(msgs))
 	}
 
@@ -298,19 +279,19 @@ func TestAnnounceDisabled(t *testing.T) {
 // TestAnnounceFetchErrorKeepsState: a failing poll is reported but never
 // advances lastAnnounced, so the next cycle retries the same range.
 func TestAnnounceFetchErrorKeepsState(t *testing.T) {
-	c, sent := announceClient(t, func(int) ([]NewRegistration, error) {
+	c, f := announceClient(t, func(int) ([]NewRegistration, error) {
 		return nil, fmt.Errorf("boom")
 	})
 	c.lastAnnounced = 4
 	c.baselined = true
 
-	if err := c.announceOnce(); err == nil {
+	if err := c.announceOnce(bg()); err == nil {
 		t.Fatal("announceOnce with a failing feed returned nil error")
 	}
 	if c.lastAnnounced != 4 {
 		t.Errorf("lastAnnounced = %d; want 4 (unchanged after a failed fetch)", c.lastAnnounced)
 	}
-	if msgs := drain(sent); len(msgs) != 0 {
+	if msgs := drain(f); len(msgs) != 0 {
 		t.Errorf("failed fetch sent %d messages; want 0", len(msgs))
 	}
 }
@@ -319,7 +300,7 @@ func TestAnnounceFetchErrorKeepsState(t *testing.T) {
 // announces, and it returns promptly when the context is cancelled — the
 // goroutine cannot outlive Run. Race detector included.
 func TestAnnounceLoopTicksAndStops(t *testing.T) {
-	c, sent := announceClient(t, func(since int) ([]NewRegistration, error) {
+	c, f := announceClient(t, func(since int) ([]NewRegistration, error) {
 		if since >= 9 {
 			return nil, nil
 		}
@@ -337,7 +318,7 @@ func TestAnnounceLoopTicksAndStops(t *testing.T) {
 	}()
 
 	select {
-	case m := <-sent:
+	case m := <-f.sendCh:
 		if !strings.Contains(bodyOf(m), "uczestnik #9") {
 			t.Errorf("loop sent %q; want the participant announcement", bodyOf(m))
 		}

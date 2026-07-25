@@ -1,6 +1,12 @@
 /dday
 *.out
 
+# Local runtime state (SQLite crypto/data stores, bot DM cache) — never commit
+*.db
+*.db-wal
+*.db-shm
+/dm_cache.json
+
 # Secrets — never commit
 matrix.env
 .env

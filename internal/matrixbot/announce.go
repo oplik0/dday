@@ -45,7 +45,7 @@ func (c *Client) announceLoop(ctx context.Context) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		if err := c.announceOnce(); err != nil {
+		if err := c.announceOnce(ctx); err != nil {
 			// A failing poll or send must not kill the loop: the next tick
 			// retries from the same lastAnnounced, so nothing is skipped.
 			log.Printf("announce cycle: %v", err)
@@ -66,7 +66,7 @@ func (c *Client) announceLoop(ctx context.Context) {
 // anything — it only adopts the current maximum id as the baseline, so a bot
 // deployed against an already-populated database does not spam the room with
 // the whole history. Only signups arriving after that are announced.
-func (c *Client) announceOnce() error {
+func (c *Client) announceOnce(ctx context.Context) error {
 	if !c.announcementsEnabled() {
 		return nil
 	}
@@ -102,7 +102,7 @@ func (c *Client) announceOnce() error {
 			continue
 		}
 		plain, html := announceText(r)
-		if err := c.sendHTML(c.AnnounceRoom, plain, html); err != nil {
+		if err := c.ops.SendHTML(ctx, c.AnnounceRoom, plain, html); err != nil {
 			// Stop at the first failure and keep lastAnnounced where it is, so
 			// the next cycle retries this registration instead of losing it.
 			if firstErr == nil {

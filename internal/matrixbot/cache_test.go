@@ -2,19 +2,16 @@ package matrixbot
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
 // TestCacheRoundTripSkipsServer verifies the persistence contract end to end: a
 // Client with a CachePath writes an entry on cacheDM; a fresh Client pointed at
 // the same file loads it via LoadCache; and existingOrNewDM then returns the
-// recorded room WITHOUT touching the server (no m.direct GET, no createRoom).
+// recorded room WITHOUT touching the transport (no m.direct read, no CreateDM).
 func TestCacheRoundTripSkipsServer(t *testing.T) {
 	const user = "@alice:mock"
 	const dm = "!persisted:mock"
@@ -22,7 +19,7 @@ func TestCacheRoundTripSkipsServer(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dm_cache.json")
 
 	// Writer: persist a mapping to disk.
-	w := New("http://unused")
+	w := New(newFakeOps())
 	w.CachePath = path
 	w.cacheDM(user, dm)
 
@@ -39,23 +36,10 @@ func TestCacheRoundTripSkipsServer(t *testing.T) {
 		t.Fatalf("on-disk cache = %v; want %s -> %s", onDisk.DMs, user, dm)
 	}
 
-	// A server that fails the test if it is ever asked to create a room or read
-	// m.direct — the loaded cache must make both unnecessary.
-	var hits int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/_matrix/client/v3/createRoom", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		writeJSON(w, map[string]any{"room_id": "!wrong:mock"})
-	})
-	mux.HandleFunc("/_matrix/client/v3/user/", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		writeJSON(w, map[string]any{})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	// Reader: brand-new Client, same path.
-	r := New(srv.URL)
+	// Reader: brand-new Client, same path. Its fake transport counts every
+	// server-touching call — the loaded cache must make all of them unnecessary.
+	f := newFakeOps()
+	r := New(f)
 	r.CachePath = path
 	n, err := r.LoadCache()
 	if err != nil {
@@ -65,22 +49,22 @@ func TestCacheRoundTripSkipsServer(t *testing.T) {
 		t.Fatalf("LoadCache loaded %d entries; want 1", n)
 	}
 
-	room, err := r.existingOrNewDM(user)
+	room, err := r.existingOrNewDM(bg(), user)
 	if err != nil {
 		t.Fatalf("existingOrNewDM: %v", err)
 	}
 	if room != dm {
 		t.Errorf("existingOrNewDM = %q; want cached %q", room, dm)
 	}
-	if got := atomic.LoadInt32(&hits); got != 0 {
-		t.Errorf("server was hit %d time(s); want 0 (cache should short-circuit)", got)
+	if got := f.hitCount(); got != 0 {
+		t.Errorf("transport was hit %d time(s); want 0 (cache should short-circuit)", got)
 	}
 }
 
 // TestLoadCacheMissingFile confirms a missing cache file is not an error: the
 // cache simply starts empty.
 func TestLoadCacheMissingFile(t *testing.T) {
-	c := New("http://unused")
+	c := New(newFakeOps())
 	c.CachePath = filepath.Join(t.TempDir(), "does-not-exist.json")
 
 	n, err := c.LoadCache()
@@ -103,7 +87,7 @@ func TestLoadCacheCorruptFile(t *testing.T) {
 		t.Fatalf("seed corrupt file: %v", err)
 	}
 
-	c := New("http://unused")
+	c := New(newFakeOps())
 	c.CachePath = path
 
 	n, err := c.LoadCache()
@@ -122,7 +106,7 @@ func TestLoadCacheCorruptFile(t *testing.T) {
 // disk I/O — behaviour is unchanged from a purely in-memory cache.
 func TestCacheDMNoPathNoIO(t *testing.T) {
 	dir := t.TempDir()
-	c := New("http://unused")
+	c := New(newFakeOps())
 	// CachePath deliberately left empty.
 	c.cacheDM("@bob:mock", "!room:mock")
 
@@ -143,7 +127,7 @@ func TestCacheDMNoPathNoIO(t *testing.T) {
 // final on-disk state is consistent JSON.
 func TestCacheDMConcurrentNoRace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dm_cache.json")
-	c := New("http://unused")
+	c := New(newFakeOps())
 	c.CachePath = path
 
 	var wg sync.WaitGroup

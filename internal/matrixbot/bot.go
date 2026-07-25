@@ -4,21 +4,23 @@
 // a registration link for a newcomer, a participant-panel magic link for
 // someone who is already signed up.
 //
-// The logic lives in this importable package (not in package main) so the
-// end-to-end test can drive the real code paths.
+// The bot speaks the Matrix client-server API — including end-to-end encrypted
+// rooms — through the mautrix library with pure-Go olm (build with -tags
+// goolm). A user's "!start" in an Element-default encrypted DM is decrypted,
+// handled by the exact same logic as a plaintext one, and answered with an
+// encrypted reply.
 //
-// The package is split by responsibility: this file holds the client type and
-// the "!start" command handling, transport.go the Matrix HTTP calls, dm.go the
-// DM resolution and its on-disk cache, policy.go the room allowlist and rate
-// limit, announce.go the public registration announcements and token.go the
-// link tokens.
+// The design keeps all command logic (this file, dm.go, announce.go, policy.go,
+// token.go) transport-agnostic: it operates on the matrixOps interface (ops.go)
+// plus the client's own state. The concrete Matrix transport is the mxClient
+// adapter (mautrix.go), injected via New. That split keeps the whole flow
+// unit-testable with an in-memory fake and drove the original test suite.
 package matrixbot
 
 import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -28,12 +30,11 @@ import (
 	"github.com/d33mobile/dday/internal/regwindow"
 )
 
-// Client is a minimal Matrix client-server API client for the bot.
+// Client holds the bot's configuration and mutable state and drives the command
+// logic against a matrixOps transport.
 type Client struct {
-	HS          string        // homeserver base URL, no trailing slash
-	Token       string        // access token (set by Login)
-	Self        string        // full MXID of the bot (set by Login)
-	HTTP        *http.Client  // HTTP client
+	ops matrixOps // Matrix transport (production: mxClient; tests: a fake)
+
 	Recipient   age.Recipient // age recipient used to encrypt the link token
 	LinkBase    string        // registration URL the token is appended to
 	PanelBase   string        // participant-panel URL the panel token is appended to
@@ -46,7 +47,7 @@ type Client struct {
 	// POST dedupes anyway).
 	CheckRegistered func(handle string) (number int, registered bool, err error)
 
-	// AllowedRooms, when non-empty, restricts which rooms Run reacts to
+	// AllowedRooms, when non-empty, restricts which rooms the bot reacts to
 	// "!start" in. An empty (or nil) set reacts everywhere — the default,
 	// unchanged behaviour. Populate it from the ALLOWED_ROOMS env var.
 	AllowedRooms map[string]bool
@@ -80,10 +81,9 @@ type Client struct {
 	now func() time.Time
 
 	// mu guards the anti-spam maps below.
-	mu        sync.Mutex
-	dmRooms   map[string]string    // handle -> cached DM room id (reused across commands)
-	lastSeen  map[string]time.Time // handle -> last acted-on "!start" time
-	warnedEnc map[string]bool      // roomID -> already logged an "encrypted, unreadable" warning
+	mu       sync.Mutex
+	dmRooms  map[string]string    // handle -> cached DM room id (reused across commands)
+	lastSeen map[string]time.Time // handle -> last acted-on "!start" time
 
 	// lastAnnounced is the highest registration id already announced. It is
 	// persisted with the DM cache so a restart does not re-announce.
@@ -93,106 +93,36 @@ type Client struct {
 	baselined bool
 }
 
-// New returns a Client for the given homeserver.
-func New(hs string) *Client {
+// New returns a Client driving the given Matrix transport.
+func New(ops matrixOps) *Client {
 	return &Client{
-		HS:       strings.TrimRight(hs, "/"),
-		HTTP:     &http.Client{Timeout: 60 * time.Second},
+		ops:      ops,
 		dmRooms:  make(map[string]string),
 		lastSeen: make(map[string]time.Time),
 	}
 }
 
-// Run drives the sync loop, reacting to "!start" until ctx is cancelled.
-func (c *Client) Run(ctx context.Context) error {
-	// Prime with an initial sync so we only react to messages from now on,
-	// not to historical backlog.
-	first, err := c.sync("", 0)
-	if err != nil {
-		return fmt.Errorf("initial sync: %w", err)
-	}
-	since := first.NextBatch
-	for roomID := range first.Rooms.Invite {
-		c.joinRoom(roomID)
-	}
-	log.Printf("listening for !start (bot is %s)", c.Self)
+// Self returns the bot's own MXID via the transport.
+func (c *Client) Self() string { return c.ops.Self() }
 
-	// Announcements run on their own clock, independent of the sync loop: the
-	// registration completes on the web side, so the only way the bot learns
-	// about it is by polling. The goroutine exits with ctx.
-	if c.announcementsEnabled() {
-		go c.announceLoop(ctx)
-	} else {
-		log.Printf("registration announcements disabled (no announce room or no feed)")
+// HandleMessage is the entry point the transport calls for every (already
+// decrypted) text message it observes. It applies the room allowlist, ignores
+// the bot's own echoes and non-command messages, and dispatches a "!start" to
+// HandleRegister. The reply is sent back into the same room's encryption
+// context: encrypted where the room is encrypted, plaintext otherwise.
+func (c *Client) HandleMessage(ctx context.Context, roomID, sender, body string) {
+	if !c.roomAllowed(roomID) {
+		return
 	}
-
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		res, err := c.sync(since, 30000)
-		if err != nil {
-			log.Printf("sync error: %v (retrying in 5s)", err)
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(5 * time.Second):
-			}
-			continue
-		}
-		since = res.NextBatch
-
-		for roomID := range res.Rooms.Invite {
-			log.Printf("invited to %s, joining", roomID)
-			c.joinRoom(roomID)
-		}
-		for roomID, room := range res.Rooms.Join {
-			if !c.roomAllowed(roomID) {
-				continue
-			}
-			for _, ev := range room.Timeline.Events {
-				if ev.Sender == c.Self {
-					continue
-				}
-				// The bot has no E2EE support: an encrypted room's messages
-				// arrive as m.room.encrypted with no readable body, so any
-				// "!start" there is invisible. Element encrypts DMs by default,
-				// so warn (once per room) instead of silently doing nothing.
-				if ev.Type == "m.room.encrypted" {
-					c.warnEncrypted(roomID)
-					continue
-				}
-				if ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" {
-					continue
-				}
-				if !isStartCmd(ev.Content.Body) {
-					continue
-				}
-				log.Printf("!start from %s in %s", ev.Sender, roomID)
-				if _, err := c.HandleRegister(roomID, ev.Sender); err != nil {
-					log.Printf("!start for %s failed: %v", ev.Sender, err)
-				}
-			}
-		}
+	if sender == c.Self() {
+		return
 	}
-}
-
-// warnEncrypted logs, once per room, that the bot received an event it cannot
-// read because the room is end-to-end encrypted. The bot has no E2EE support,
-// so "!start" sent in an encrypted room (e.g. an Element-default encrypted DM)
-// is invisible to it. Surfacing this in the logs turns a silent no-op into a
-// diagnosable cause.
-func (c *Client) warnEncrypted(roomID string) {
-	c.mu.Lock()
-	if c.warnedEnc == nil {
-		c.warnedEnc = make(map[string]bool)
+	if !isStartCmd(body) {
+		return
 	}
-	already := c.warnedEnc[roomID]
-	c.warnedEnc[roomID] = true
-	c.mu.Unlock()
-	if !already {
-		log.Printf("cannot read %s: it is end-to-end encrypted and the bot has no E2EE support "+
-			"— users must send !start in an unencrypted room", roomID)
+	log.Printf("!start from %s in %s", sender, roomID)
+	if _, err := c.HandleRegister(ctx, roomID, sender); err != nil {
+		log.Printf("!start for %s failed: %v", sender, err)
 	}
 }
 
@@ -223,7 +153,7 @@ func isStartCmd(body string) bool {
 //
 // For the public branches an empty originRoom means the reply is only logged.
 // It returns the DM room id for the DM branches, and "" for the public ones.
-func (c *Client) HandleRegister(originRoom, user string) (string, error) {
+func (c *Client) HandleRegister(ctx context.Context, originRoom, user string) (string, error) {
 	// Per-handle rate limit: drop a burst of "!start" from the same user so a
 	// single command yields a single DM. Returns an empty room id, no error.
 	if c.rateLimited(user) {
@@ -238,7 +168,7 @@ func (c *Client) HandleRegister(originRoom, user string) (string, error) {
 		if err != nil {
 			log.Printf("check registered for %s: %v (proceeding)", user, err)
 		} else if registered {
-			return c.sendPanelLink(originRoom, user, number)
+			return c.sendPanelLink(ctx, originRoom, user, number)
 		}
 	}
 
@@ -248,23 +178,23 @@ func (c *Client) HandleRegister(originRoom, user string) (string, error) {
 		name := localpart(user)
 		plain := fmt.Sprintf("Hej %s, zapisy jeszcze nie wystartowały — ruszają w %s. Wróć wtedy i napisz !start.", name, regwindow.OpenStartText())
 		html := fmt.Sprintf("Hej %s, zapisy jeszcze nie wystartowały — ruszają w <b>%s</b>. Wróć wtedy i napisz <code>!start</code>.", mention(user), regwindow.OpenStartText())
-		return c.replyPublic(originRoom, plain, html)
+		return c.replyPublic(ctx, originRoom, plain, html)
 	}
 
 	link, err := c.registerLink(user)
 	if err != nil {
 		return "", fmt.Errorf("build link: %w", err)
 	}
-	dmRoom, _, err := c.resolveDM(originRoom, user)
+	dmRoom, _, err := c.resolveDM(ctx, originRoom, user)
 	if err != nil {
 		return "", fmt.Errorf("resolve dm: %w", err)
 	}
 	plain := fmt.Sprintf("Cześć! Zapisy na D-Day (unconference w Hakierspejsie): %s", link)
 	html := fmt.Sprintf("Cześć! Zapisy na <b>D-Day</b> (unconference w Hakierspejsie):<br><a href=%q>zarejestruj się</a>", link)
-	if err := c.sendHTML(dmRoom, plain, html); err != nil {
+	if err := c.ops.SendHTML(ctx, dmRoom, plain, html); err != nil {
 		return dmRoom, fmt.Errorf("send: %w", err)
 	}
-	c.nudge(originRoom, dmRoom, user, "wysłałem Ci tam link do rejestracji.")
+	c.nudge(ctx, originRoom, dmRoom, user, "wysłałem Ci tam link do rejestracji.")
 	return dmRoom, nil
 }
 
@@ -277,16 +207,16 @@ func (c *Client) HandleRegister(originRoom, user string) (string, error) {
 // Every failure degrades to the old public "you are already signed up" reply
 // rather than an error: an unconfigured PanelBase or a token/DM problem must
 // not leave the user without an answer.
-func (c *Client) sendPanelLink(originRoom, user string, number int) (string, error) {
+func (c *Client) sendPanelLink(ctx context.Context, originRoom, user string, number int) (string, error) {
 	link, err := c.panelLink(user)
 	if err != nil {
 		log.Printf("panel link for %s: %v (falling back to public reply)", user, err)
-		return c.replyAlreadyRegistered(originRoom, user)
+		return c.replyAlreadyRegistered(ctx, originRoom, user)
 	}
-	dmRoom, _, err := c.resolveDM(originRoom, user)
+	dmRoom, _, err := c.resolveDM(ctx, originRoom, user)
 	if err != nil {
 		log.Printf("resolve dm for %s: %v (falling back to public reply)", user, err)
-		return c.replyAlreadyRegistered(originRoom, user)
+		return c.replyAlreadyRegistered(ctx, originRoom, user)
 	}
 
 	who := "Jesteś już zapisany 🎉"
@@ -295,21 +225,21 @@ func (c *Client) sendPanelLink(originRoom, user string, number int) (string, err
 	}
 	plain := fmt.Sprintf("%s Oto link do Twojego panelu — możesz tam sprawdzić status i w razie czego wycofać udział: %s", who, link)
 	html := fmt.Sprintf("%s Oto link do Twojego panelu — możesz tam sprawdzić status i w razie czego wycofać udział:<br><a href=%q>otwórz panel</a>", who, link)
-	if err := c.sendHTML(dmRoom, plain, html); err != nil {
+	if err := c.ops.SendHTML(ctx, dmRoom, plain, html); err != nil {
 		log.Printf("send panel link to %s: %v (falling back to public reply)", user, err)
-		return c.replyAlreadyRegistered(originRoom, user)
+		return c.replyAlreadyRegistered(ctx, originRoom, user)
 	}
-	c.nudge(originRoom, dmRoom, user, "wysłałem Ci tam link do Twojego panelu.")
+	c.nudge(ctx, originRoom, dmRoom, user, "wysłałem Ci tam link do Twojego panelu.")
 	return dmRoom, nil
 }
 
 // replyAlreadyRegistered is the link-less fallback for the already-registered
 // branch: a public reply in originRoom that deliberately omits the participant
 // number so it is not leaked in a channel.
-func (c *Client) replyAlreadyRegistered(originRoom, user string) (string, error) {
+func (c *Client) replyAlreadyRegistered(ctx context.Context, originRoom, user string) (string, error) {
 	plain := fmt.Sprintf("Hej %s, jesteś już zapisany 🎉 Ponowna rejestracja nie jest możliwa.", localpart(user))
 	html := fmt.Sprintf("Hej %s, jesteś już zapisany 🎉 Ponowna rejestracja nie jest możliwa.", mention(user))
-	return c.replyPublic(originRoom, plain, html)
+	return c.replyPublic(ctx, originRoom, plain, html)
 }
 
 // replyPublic sends a public reply into originRoom (the channel the "!start"
@@ -317,12 +247,12 @@ func (c *Client) replyAlreadyRegistered(originRoom, user string) (string, error)
 // and no DM is ever opened — so a command from an unknown context is a no-op
 // rather than spawning a private chat. It always returns ("", nil): the caller
 // exposes "no DM room was created".
-func (c *Client) replyPublic(originRoom, plain, html string) (string, error) {
+func (c *Client) replyPublic(ctx context.Context, originRoom, plain, html string) (string, error) {
 	if originRoom == "" {
 		log.Printf("replyPublic: no origin room, dropping message: %s", plain)
 		return "", nil
 	}
-	if err := c.sendHTML(originRoom, plain, html); err != nil {
+	if err := c.ops.SendHTML(ctx, originRoom, plain, html); err != nil {
 		return "", fmt.Errorf("send: %w", err)
 	}
 	return "", nil
@@ -339,7 +269,7 @@ func mention(user string) string {
 // came from), @-mentioning the user and pointing them at their DMs. It is a
 // best-effort side channel: it is skipped when originRoom is unknown or is the
 // DM itself, and any send error is only logged.
-func (c *Client) nudge(originRoom, dmRoom, user, tail string) {
+func (c *Client) nudge(ctx context.Context, originRoom, dmRoom, user, tail string) {
 	if originRoom == "" || originRoom == dmRoom {
 		return
 	}
@@ -347,7 +277,7 @@ func (c *Client) nudge(originRoom, dmRoom, user, tail string) {
 	plain := fmt.Sprintf("Hej %s, sprawdź prywatne wiadomości - %s", name, tail)
 	html := fmt.Sprintf("Hej <a href=%q>%s</a>, sprawdź prywatne wiadomości - %s",
 		"https://matrix.to/#/"+user, name, tail)
-	if err := c.sendHTML(originRoom, plain, html); err != nil {
+	if err := c.ops.SendHTML(ctx, originRoom, plain, html); err != nil {
 		log.Printf("nudge in %s: %v", originRoom, err)
 	}
 }

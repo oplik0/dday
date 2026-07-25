@@ -4,10 +4,9 @@
 package matrixbot
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -21,11 +20,11 @@ import (
 //   - Otherwise an existing DM is reused (in-memory cache, then the m.direct
 //     account data, so a restart doesn't spawn a duplicate) or a fresh one is
 //     created; isOrigin is false.
-func (c *Client) resolveDM(originRoom, user string) (roomID string, isOrigin bool, err error) {
-	if originRoom != "" && c.isDMWith(originRoom, user) {
+func (c *Client) resolveDM(ctx context.Context, originRoom, user string) (roomID string, isOrigin bool, err error) {
+	if originRoom != "" && c.isDMWith(ctx, originRoom, user) {
 		return originRoom, true, nil
 	}
-	room, err := c.existingOrNewDM(user)
+	room, err := c.existingOrNewDM(ctx, user)
 	if err != nil {
 		return "", false, err
 	}
@@ -35,30 +34,27 @@ func (c *Client) resolveDM(originRoom, user string) (roomID string, isOrigin boo
 // isDMWith reports whether roomID is a 1:1 private chat between the bot and
 // user: exactly two joined members, the bot and user. Any query error is
 // treated as "not a DM" (fail-safe: fall through to normal DM handling).
-func (c *Client) isDMWith(roomID, user string) bool {
-	var out struct {
-		Joined map[string]json.RawMessage `json:"joined"`
-	}
-	path := fmt.Sprintf("/_matrix/client/v3/rooms/%s/joined_members", url.PathEscape(roomID))
-	if err := c.do("GET", path, nil, &out); err != nil {
+func (c *Client) isDMWith(ctx context.Context, roomID, user string) bool {
+	joined, err := c.ops.JoinedMembers(ctx, roomID)
+	if err != nil {
 		log.Printf("joined_members %s: %v (treating as non-DM)", roomID, err)
 		return false
 	}
-	if len(out.Joined) != 2 {
+	if len(joined) != 2 {
 		return false
 	}
-	_, hasBot := out.Joined[c.Self]
-	_, hasUser := out.Joined[user]
+	_, hasBot := joined[c.Self()]
+	_, hasUser := joined[user]
 	return hasBot && hasUser
 }
 
 // existingOrNewDM returns a DM room with user, preferring an existing one over
 // handing the user a fresh, empty chat. Lookup order: the in-memory cache, then
 // the m.direct account data (which survives a bot restart), and only failing
-// both does it POST /createRoom. A freshly created room is recorded in the
-// cache and appended to m.direct. m.direct maintenance is best-effort — its
-// errors are logged, never fatal.
-func (c *Client) existingOrNewDM(user string) (string, error) {
+// both does it create a room. A freshly created room is recorded in the cache
+// and appended to m.direct. m.direct maintenance is best-effort — its errors are
+// logged, never fatal.
+func (c *Client) existingOrNewDM(ctx context.Context, user string) (string, error) {
 	c.mu.Lock()
 	if room := c.dmRooms[user]; room != "" {
 		c.mu.Unlock()
@@ -66,25 +62,18 @@ func (c *Client) existingOrNewDM(user string) (string, error) {
 	}
 	c.mu.Unlock()
 
-	if room := c.directRoomFor(user); room != "" {
+	if room := c.directRoomFor(ctx, user); room != "" {
 		c.cacheDM(user, room)
 		return room, nil
 	}
 
-	body := map[string]any{
-		"preset":    "trusted_private_chat",
-		"is_direct": true,
-		"invite":    []string{user},
-	}
-	var out struct {
-		RoomID string `json:"room_id"`
-	}
-	if err := c.do("POST", "/_matrix/client/v3/createRoom", body, &out); err != nil {
+	roomID, err := c.ops.CreateDM(ctx, user)
+	if err != nil {
 		return "", err
 	}
-	c.cacheDM(user, out.RoomID)
-	c.recordDirect(user, out.RoomID)
-	return out.RoomID, nil
+	c.cacheDM(user, roomID)
+	c.recordDirect(ctx, user, roomID)
+	return roomID, nil
 }
 
 // cacheDM records room as the DM for user in the in-memory cache and, when a
@@ -208,28 +197,17 @@ func parseCacheFile(data []byte) (cacheFile, bool) {
 	return cacheFile{}, false
 }
 
-// directMap is the shape of the m.direct account data: a mapping from a user's
-// MXID to the list of DM room ids the bot shares with them.
-type directMap map[string][]string
-
-// fetchDirect reads the bot's m.direct account data. A 404 (never set) or any
-// other error yields a nil map; callers treat that as "no known DMs".
-func (c *Client) fetchDirect() directMap {
-	if c.Self == "" {
-		return nil
-	}
-	path := fmt.Sprintf("/_matrix/client/v3/user/%s/account_data/m.direct", url.PathEscape(c.Self))
-	var out directMap
-	if err := c.do("GET", path, nil, &out); err != nil {
-		return nil
-	}
-	return out
-}
-
 // directRoomFor returns the first DM room the m.direct account data records for
-// user, or "" if none is known.
-func (c *Client) directRoomFor(user string) string {
-	for _, room := range c.fetchDirect()[user] {
+// user, or "" if none is known. Any read error yields "".
+func (c *Client) directRoomFor(ctx context.Context, user string) string {
+	if c.Self() == "" {
+		return ""
+	}
+	direct, err := c.ops.GetDirect(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, room := range direct[user] {
 		if room != "" {
 			return room
 		}
@@ -240,13 +218,13 @@ func (c *Client) directRoomFor(user string) string {
 // recordDirect appends room to the m.direct account-data entry for user, so the
 // DM stays rediscoverable across a bot restart. Best-effort: any error (and the
 // case where the bot's MXID is unknown) is logged and swallowed.
-func (c *Client) recordDirect(user, room string) {
-	if c.Self == "" || room == "" {
+func (c *Client) recordDirect(ctx context.Context, user, room string) {
+	if c.Self() == "" || room == "" {
 		return
 	}
-	direct := c.fetchDirect()
-	if direct == nil {
-		direct = directMap{}
+	direct, err := c.ops.GetDirect(ctx)
+	if err != nil || direct == nil {
+		direct = map[string][]string{}
 	}
 	for _, r := range direct[user] {
 		if r == room {
@@ -254,8 +232,7 @@ func (c *Client) recordDirect(user, room string) {
 		}
 	}
 	direct[user] = append(direct[user], room)
-	path := fmt.Sprintf("/_matrix/client/v3/user/%s/account_data/m.direct", url.PathEscape(c.Self))
-	if err := c.do("PUT", path, direct, nil); err != nil {
+	if err := c.ops.SetDirect(ctx, direct); err != nil {
 		log.Printf("update m.direct for %s: %v", user, err)
 	}
 }

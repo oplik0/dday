@@ -1,12 +1,8 @@
 package matrixbot
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestHandleRegisterAlreadyRegisteredNoPanel asserts the fallback of the
@@ -17,54 +13,49 @@ import (
 func TestHandleRegisterAlreadyRegisteredNoPanel(t *testing.T) {
 	recipient, _ := genKeypair(t)
 
-	created := make(chan map[string]any, 1)
-	sent := make(chan map[string]any, 4)
-	srv := newMockMatrix(t, created, sent)
-	defer srv.Close()
-
-	c := New(srv.URL)
+	f := newFakeOps()
+	c := New(f)
 	c.Recipient = recipient
 	c.LinkBase = "https://dday.hs-ldz.pl/register"
 	c.TokenSecret = testSecret
 	c.CheckRegistered = func(string) (int, bool, error) { return 7, true, nil }
-	if err := c.Login("@ddaybot:mock", "secret"); err != nil {
-		t.Fatalf("login: %v", err)
-	}
 
-	room, err := c.HandleRegister("!chan:mock", "@alice:mock")
+	room, err := c.HandleRegister(bg(), "!chan:mock", "@alice:mock")
 	if err != nil {
 		t.Fatalf("HandleRegister: %v", err)
 	}
 	if room != "" {
 		t.Errorf("HandleRegister returned room %q, want \"\" (no DM opened)", room)
 	}
-
-	// No DM must have been created.
-	select {
-	case <-created:
-		t.Fatal("already-registered must NOT create a DM room")
-	default:
+	if n := f.createCount(); n != 0 {
+		t.Fatalf("already-registered must NOT create a DM room; got %d creates", n)
 	}
 
-	sendBody := <-sent
-	body, _ := sendBody["body"].(string)
-	if !strings.Contains(body, "już zapisany") {
-		t.Errorf("body = %q; want 'już zapisany'", body)
+	msgs := f.sentMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("sends = %d; want 1 public reply", len(msgs))
 	}
-	if !strings.Contains(body, "nie jest możliwa") {
-		t.Errorf("body = %q; want 'nie jest możliwa'", body)
+	sb := msgs[0]
+	if sb.room != "!chan:mock" {
+		t.Errorf("reply room = %q; want the origin channel", sb.room)
 	}
-	if strings.Contains(body, "#7") {
-		t.Errorf("body = %q; must NOT reveal the participant number in public", body)
+	if !strings.Contains(sb.plain, "już zapisany") {
+		t.Errorf("body = %q; want 'już zapisany'", sb.plain)
 	}
-	if strings.Contains(body, "?t=") {
-		t.Errorf("body = %q; must NOT contain a registration link", body)
+	if !strings.Contains(sb.plain, "nie jest możliwa") {
+		t.Errorf("body = %q; want 'nie jest możliwa'", sb.plain)
 	}
-	if f, _ := sendBody["formatted_body"].(string); strings.Contains(f, "?t=") {
-		t.Errorf("formatted_body = %q; must NOT contain a registration link", f)
+	if strings.Contains(sb.plain, "#7") {
+		t.Errorf("body = %q; must NOT reveal the participant number in public", sb.plain)
 	}
-	if f, _ := sendBody["formatted_body"].(string); !strings.Contains(f, "matrix.to/#/@alice:mock") {
-		t.Errorf("formatted_body = %q; want a matrix.to mention of the user", f)
+	if strings.Contains(sb.plain, "?t=") {
+		t.Errorf("body = %q; must NOT contain a registration link", sb.plain)
+	}
+	if strings.Contains(sb.html, "?t=") {
+		t.Errorf("formatted_body = %q; must NOT contain a registration link", sb.html)
+	}
+	if !strings.Contains(sb.html, "matrix.to/#/@alice:mock") {
+		t.Errorf("formatted_body = %q; want a matrix.to mention of the user", sb.html)
 	}
 }
 
@@ -74,81 +65,34 @@ func TestHandleRegisterAlreadyRegisteredNoPanel(t *testing.T) {
 func TestHandleRegisterNudge(t *testing.T) {
 	recipient, _ := genKeypair(t)
 
-	type sendRec struct {
-		room string
-		body map[string]any
-	}
-	sends := make(chan sendRec, 4)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"access_token": "tok", "user_id": "@ddaybot:mock"})
-	})
-	mux.HandleFunc("/_matrix/client/v3/createRoom", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"room_id": "!dm:mock"})
-	})
-	mux.HandleFunc("/_matrix/client/v3/rooms/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/send/") {
-			sends <- sendRec{room: roomFromPath(r.URL.Path), body: readJSON(t, r)}
-		}
-		writeJSON(w, map[string]any{"event_id": "$e"})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := New(srv.URL)
+	f := newFakeOps()
+	c := New(f)
 	c.Recipient = recipient
 	c.LinkBase = "https://dday.hs-ldz.pl/register"
 	c.TokenSecret = testSecret
-	if err := c.Login("@ddaybot:mock", "secret"); err != nil {
-		t.Fatalf("login: %v", err)
-	}
 
-	if _, err := c.HandleRegister("!chan:mock", "@alice:mock"); err != nil {
+	if _, err := c.HandleRegister(bg(), "!chan:mock", "@alice:mock"); err != nil {
 		t.Fatalf("HandleRegister: %v", err)
 	}
 
-	var dm, nudge sendRec
-	for i := 0; i < 2; i++ {
-		select {
-		case s := <-sends:
-			if s.room == "!chan:mock" {
-				nudge = s
-			} else {
-				dm = s
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("timed out waiting for send %d/2", i+1)
+	var dm, nudge recordedSend
+	for _, s := range f.sentMessages() {
+		if s.room == "!chan:mock" {
+			nudge = s
+		} else {
+			dm = s
 		}
 	}
-
 	if nudge.room != "!chan:mock" {
 		t.Fatalf("expected a public nudge in !chan:mock, got none")
 	}
-	nb, _ := nudge.body["body"].(string)
-	if !strings.Contains(nb, "sprawdź prywatne wiadomości") {
-		t.Errorf("nudge body = %q; want 'sprawdź prywatne wiadomości'", nb)
+	if !strings.Contains(nudge.plain, "sprawdź prywatne wiadomości") {
+		t.Errorf("nudge body = %q; want 'sprawdź prywatne wiadomości'", nudge.plain)
 	}
-	nf, _ := nudge.body["formatted_body"].(string)
-	if !strings.Contains(nf, "matrix.to/#/@alice:mock") {
-		t.Errorf("nudge formatted_body = %q; want a matrix.to mention of the user", nf)
+	if !strings.Contains(nudge.html, "matrix.to/#/@alice:mock") {
+		t.Errorf("nudge formatted_body = %q; want a matrix.to mention of the user", nudge.html)
 	}
-
-	db, _ := dm.body["body"].(string)
-	if !strings.Contains(db, "?t=") {
-		t.Errorf("dm body = %q; want the registration link", db)
+	if !strings.Contains(dm.plain, "?t=") {
+		t.Errorf("dm body = %q; want the registration link", dm.plain)
 	}
-}
-
-// roomFromPath pulls the room id out of a /_matrix/.../rooms/{roomID}/send/...
-// path, undoing the path escaping the client applies.
-func roomFromPath(path string) string {
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		if p == "rooms" && i+1 < len(parts) {
-			room, _ := url.PathUnescape(parts[i+1])
-			return room
-		}
-	}
-	return ""
 }
