@@ -20,7 +20,6 @@ CONTAINER="${SYNAPSE_CONTAINER:-dday-e2e-synapse}"
 VOLUME="${SYNAPSE_VOLUME:-dday-e2e-synapse-data}"
 PORT="${SYNAPSE_PORT:-8008}"
 SERVER_NAME="${SYNAPSE_SERVER_NAME:-localhost}"
-SHARED_SECRET="dday-e2e-shared-secret"
 BASE_URL="http://localhost:${PORT}"
 
 # Test accounts the e2e test logs in as. Passwords are throwaway and local-only.
@@ -72,31 +71,38 @@ up() {
       -e SYNAPSE_REPORT_STATS=no \
       "${IMAGE}" generate >/dev/null
 
-    # Enable open registration, a shared secret for register_new_matrix_user, and
-    # loosen every rate limit so the test can register + burst messages freely.
+    # Enable open registration and loosen every rate limit so the test can
+    # register + burst logins/messages freely. `generate` already wrote a random
+    # registration_shared_secret (used by register_new_matrix_user) and does NOT
+    # emit any of the keys below, so appending them is duplicate-free.
+    #
+    # The append runs INSIDE a container (the volume is owned by the synapse uid):
+    # the heredoc feeds cat's stdin from within the container's own shell, so no
+    # `docker run -i` is needed. A previous python-over-stdin version silently
+    # no-op'd without -i, leaving the default rc_login.address burst of 3 to 429
+    # the test's logins.
     log "patching homeserver.yaml (open registration + relaxed rate limits)"
-    docker run --rm -v "${VOLUME}:/data" --entrypoint python3 "${IMAGE}" \
-      - "${SHARED_SECRET}" <<'PY'
-import sys, yaml
-secret = sys.argv[1]
-path = "/data/homeserver.yaml"
-with open(path) as f:
-    cfg = yaml.safe_load(f)
-cfg["enable_registration"] = True
-cfg["enable_registration_without_verification"] = True
-cfg["registration_shared_secret"] = secret
-big = {"per_second": 1000, "burst_count": 1000}
-cfg["rc_message"] = dict(big)
-cfg["rc_registration"] = dict(big)
-cfg["rc_joins"] = {"local": dict(big), "remote": dict(big)}
-cfg["rc_login"] = {"address": dict(big), "account": dict(big), "failed_attempts": dict(big)}
-cfg["rc_admin_redaction"] = dict(big)
-cfg["rc_invites"] = {"per_room": dict(big), "per_user": dict(big)}
-cfg["rc_key_requests"] = dict(big)
-with open(path, "w") as f:
-    yaml.safe_dump(cfg, f)
-print("patched", path)
-PY
+    docker run --rm -v "${VOLUME}:/data" --entrypoint sh "${IMAGE}" -c 'cat >> /data/homeserver.yaml <<YAML
+
+# --- appended by scripts/e2e-synapse.sh (test-only, insecure) ---
+enable_registration: true
+enable_registration_without_verification: true
+registration_requires_token: false
+rc_message: {per_second: 1000, burst_count: 1000}
+rc_registration: {per_second: 1000, burst_count: 1000}
+rc_login:
+  address: {per_second: 1000, burst_count: 1000}
+  account: {per_second: 1000, burst_count: 1000}
+  failed_attempts: {per_second: 1000, burst_count: 1000}
+rc_joins:
+  local: {per_second: 1000, burst_count: 1000}
+  remote: {per_second: 1000, burst_count: 1000}
+rc_invites:
+  per_room: {per_second: 1000, burst_count: 1000}
+  per_user: {per_second: 1000, burst_count: 1000}
+rc_key_requests: {per_second: 1000, burst_count: 1000}
+rc_admin_redaction: {per_second: 1000, burst_count: 1000}
+YAML'
   else
     log "reusing existing volume ${VOLUME}"
   fi

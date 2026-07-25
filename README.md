@@ -164,6 +164,8 @@ Bot Matrix (`cmd/bot`, konfiguracja zwykle w `matrix.env`):
 | `ANNOUNCE_INTERVAL` | `30s` | jak często bot odpytuje `/api/registrations` (format `time.ParseDuration`) |
 | `ALLOWED_ROOMS` | *(puste)* | lista room id po przecinku; puste = bot reaguje wszędzie |
 | `DM_CACHE_PATH` | *(puste)* | plik stanu bota (cache `handle → room id` + `lastAnnounced`), przeżywa restart |
+| `CRYPTO_DB_PATH` | `/data/crypto.db` | pure-Go SQLite crypto store (tożsamość urządzenia bota + sesje megolm); na wolumenie, żeby przeżyć redeploy — patrz [Szyfrowane DM-y (E2EE)](#szyfrowane-dm-y-e2ee) |
+| `CRYPTO_PICKLE_KEY` | *(puste)* | klucz szyfrujący konto olm w spoczynku; **musi być stały** — z tym samym `CRYPTO_DB_PATH` utrzymuje urządzenie i sesje między restartami. Puste = generowany efemerycznie z ostrzeżeniem (restart gubi wszystkie sesje) |
 | `REGISTRATION_OPEN`, `REGISTRATION_OPEN_AT` | jak wyżej | bot używa tej samej bramki i tego samego opisu daty |
 
 Formaty dat (`*_AT`): RFC3339 (`2026-07-26T15:00:00+02:00`) albo
@@ -210,9 +212,58 @@ jawnie ustawiona wartość z istniejącego `.env` jest zachowywana). Po zapisie
 `docker-compose.yml` wystawia serwis `dday` przez Traefika na
 `dday.hs-ldz.pl` (entrypoint `websecure`, certresolver `myresolver`) i uruchamia
 serwis `bot`. Dane trwałe: wolumen `dday-data` (`/data/dday.db`) i `bot-data`
-(cache DM-ów bota). Zmienne `REGISTRATION_OPEN_AT` / `EVENT_START_AT` /
-`EVENT_END_AT` są przepuszczane do obu serwisów — ustaw je w `.env`, jeśli
-zmieniasz termin.
+(cache DM-ów bota **oraz crypto store E2EE** `/data/crypto.db` — patrz niżej).
+Zmienne `REGISTRATION_OPEN_AT` / `EVENT_START_AT` / `EVENT_END_AT` są
+przepuszczane do obu serwisów — ustaw je w `.env`, jeśli zmieniasz termin.
+
+**Jeden `.env`, oba serwisy.** `make up` zapisuje pojedynczy `.env`, z którego
+`docker compose` podstawia zmienne do **obu** usług: sekrety wspólne
+(`TOKEN_SECRET`, `INTERNAL_TOKEN`) trafiają i do `dday`, i do `bot`, a każda
+usługa dostaje dodatkowo swoje (`ADMIN_TOKEN`, `AGE_KEY_DATA` → tylko web;
+`CRYPTO_PICKLE_KEY`, `AGE_PUB_DATA` → tylko bot). Sam bot bierze jeszcze
+`MATRIX_*` i `REGISTER_URL` z `matrix.env` (też gitignored). Dzięki temu nie ma
+„rozjechanego" wdrożenia — token, którym bot podpisuje link, i sekret, którym web
+go weryfikuje, pochodzą z tej samej linii w tym samym pliku.
+
+## Szyfrowane DM-y (E2EE)
+
+Bot **czyta i odpowiada w end-to-end szyfrowanych** pokojach. Ma to znaczenie w
+praktyce: Element (i większość klientów Matrix) **domyślnie szyfruje prywatne
+konwersacje**, więc `!start` napisane botowi na priv przychodzi jako
+`m.room.encrypted`. Transport to `maunium.net/go/mautrix` + `cryptohelper` z
+czysto-Go implementacją olm/megolm (build tag `goolm`), dzięki czemu binarka
+linkuje się statycznie przy `CGO_ENABLED=0` (bez taga mautrix ciągnie `libolm`
+przez cgo i nie zlinkuje). Ta sama logika komend obsługuje szyfrowane i
+nieszyfrowane wiadomości — po odszyfrowaniu event jest zwykłym `m.room.message`.
+
+**Crypto store na wolumenie — kluczowe dla persystencji.** Tożsamość urządzenia
+bota i sesje megolm żyją w pure-Go SQLite pod `CRYPTO_DB_PATH` (domyślnie
+`/data/crypto.db`, na wolumenie `bot-data`). Przy pierwszym starcie bot loguje
+się hasłem, tworzy urządzenie i **uploaduje na homeserver klucze urządzenia**
+(device keys). Przy kolejnych startach `cryptohelper` odnajduje zapisane
+`device_id` w tym store i loguje się na to **samo** urządzenie — sesje megolm
+zostają, więc bot dalej czyta i odpowiada bez ponownej akceptacji kluczy.
+
+- `CRYPTO_PICKLE_KEY` szyfruje konto olm w spoczynku i **musi być stały**.
+  `make up` generuje go raz i reużywa (`grep CRYPTO_PICKLE_KEY .env`). Zmiana lub
+  utrata klucza (albo skasowanie wolumenu z `crypto.db`) = **nowe urządzenie**,
+  nowe klucze i utrata dotychczasowych sesji. Puste `CRYPTO_PICKLE_KEY` w devie
+  daje klucz efemeryczny i log-ostrzeżenie (restart gubi wszystkie sesje).
+- **Weryfikacja / „wysyłaj tylko do zweryfikowanych sesji".** Bot nie robi
+  cross-signingu ani interaktywnej weryfikacji. Ustawia jawnie
+  `SendKeysMinTrust = ShareKeysMinTrust = Unset` (najniższy próg — to zresztą
+  domyślne zachowanie biblioteki), więc **wysyła klucze megolm także do
+  niezweryfikowanych urządzeń** i w typowej konfiguracji Elementa działa bez
+  żadnej weryfikacji. Wyjątek: jeśli klient uczestnika ma włączone twarde
+  „**Never send encrypted messages to unverified sessions**", jego wiadomości do
+  bota mogą nie dojść, dopóki tej opcji nie wyłączy albo (docelowo) nie doda się
+  botowi weryfikacji. W praktyce ta opcja jest domyślnie **wyłączona**, więc
+  zwykle nic nie trzeba robić.
+
+Build bota (w Dockerfilu): `CGO_ENABLED=0 go build -tags goolm` → statyczny ELF
+na obrazie `distroless/static:nonroot` (potwierdzone: „not a dynamic
+executable"). Round-trip E2EE jest udowodniony testem integracyjnym `make e2e`
+przeciw prawdziwemu Synapse — patrz [Test E2EE](#test-e2ee-prawdziwy-synapse).
 
 ## Automatyczne otwarcie zapisów
 

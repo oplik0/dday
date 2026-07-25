@@ -175,6 +175,14 @@ func registerRoundTrip(t *testing.T, encrypted bool) {
 			if evt.Sender != botID {
 				continue
 			}
+			// Only accept the reply in the room THIS run created. Both accounts
+			// are reused server-side across runs, so a fresh login replays
+			// backlog — including a bot reply from an earlier run's room, whose
+			// token was minted with a different ephemeral key. Filtering by room
+			// keeps the test hermetic against that reused-homeserver history.
+			if evt.RoomID != roomID {
+				continue
+			}
 			decrypted := evt.Mautrix.EventSource&event.SourceDecrypted != 0
 			body := evt.Content.AsMessage().Body
 			t.Logf("alice received from bot in %s (decrypted=%v): %q", evt.RoomID, decrypted, body)
