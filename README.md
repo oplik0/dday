@@ -265,6 +265,60 @@ na obrazie `distroless/static:nonroot` (potwierdzone: „not a dynamic
 executable"). Round-trip E2EE jest udowodniony testem integracyjnym `make e2e`
 przeciw prawdziwemu Synapse — patrz [Test E2EE](#test-e2ee-prawdziwy-synapse).
 
+### Wdrożenie E2EE / czysty redeploy
+
+Po przejściu na E2EE bot **utrzymuje tożsamość urządzenia** i wymaga dwóch rzeczy,
+których nie wolno zgubić:
+
+- **`CRYPTO_PICKLE_KEY`** — stały, w `.env` (generuje go `make up`, tak samo jak
+  `INTERNAL_TOKEN`/`TOKEN_SECRET`/`ADMIN_TOKEN`; istniejąca wartość jest reużywana).
+- **Wolumen `bot-data`** — trzyma `crypto.db` (device_id + sesje megolm) oraz
+  `dm_cache.json`. **Nie kasuj tego wolumenu** (`docker compose down -v`,
+  `docker volume rm`) — bot straciłby tożsamość urządzenia i historię sesji i
+  musiałby uploadować nowe device keys jako świeże, niezweryfikowane urządzenie.
+
+**Pierwsze uruchomienie po wdrożeniu E2EE.** Bot loguje się hasłem, tworzy
+urządzenie i **uploaduje device keys** na homeserver. Od tej chwili każdy, kto
+napisze `!start` w szyfrowanym DM do bota, jest obsłużony (odpowiedź wraca
+zaszyfrowana). Element domyślnie dzieli klucze megolm także do niezweryfikowanych
+sesji, więc działa bez żadnej weryfikacji; tylko uczestnik z twardą polityką
+„never send to unverified sessions" musiałby najpierw zweryfikować bota.
+
+**Czysty redeploy obu serwisów z jednego `.env`** (na hoście produkcyjnym):
+
+```sh
+cd /ścieżka/do/dday
+git pull --ff-only
+# upewnij się, że w .env NIE ma wymuszonego REGISTRATION_OPEN (pusta wartość albo
+# brak linii = automatyczny time gate; 1 = na stałe otwarte — patrz sekcja niżej):
+grep '^REGISTRATION_OPEN=' .env        # spodziewane: puste albo brak
+make up                                # dopisuje BRAKUJĄCE sekrety (w tym
+                                       # CRYPTO_PICKLE_KEY), reużywa istniejące,
+                                       # i robi docker compose up -d --build
+docker compose ps                      # MUSI pokazać OBA: dday (web) i bot
+```
+
+`docker compose ps` musi wylistować **oba** serwisy — `dday` (web) i `bot` — w tym
+samym projekcie compose. Jeśli web chodzi osobnym mechanizmem (np. inny
+compose-project albo ręczny `docker run`), przenieś go do **tego samego**
+`docker-compose.yml`, żeby dzielił `.env` — inaczej `TOKEN_SECRET`/`INTERNAL_TOKEN`
+się rozjadą: token, którym bot podpisuje link, nie zweryfikuje się po stronie web
+(„Nieprawidłowy link"), a `/api/registered` odrzuci bota.
+
+**Weryfikacja po wdrożeniu:**
+
+```sh
+docker compose logs bot | tail -30
+```
+
+- ma być wpis `logged in, crypto initialised` (z `user_id`/`device_id`),
+- **brak** crash-loopu (kontener nie restartuje się w kółko),
+- **brak** ostrzeżenia `WARNING: CRYPTO_PICKLE_KEY not set` — jeśli je widzisz,
+  klucz jest efemeryczny i restart zgubi sesje: uzupełnij `.env` i `make up`.
+
+Test właściwy: napisz `!start` w **szyfrowanym** DM do `@ddaybot` → w ciągu paru
+sekund powinien wrócić (zaszyfrowany) link `…/register?t=…`.
+
 ## Automatyczne otwarcie zapisów
 
 **Nie trzeba nic robić ręcznie w momencie startu zapisów.** Rejestracja otwiera
