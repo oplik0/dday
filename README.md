@@ -304,8 +304,8 @@ ponownie. To celowe i akceptowalne.
 ## Testy
 
 ```sh
-make test          # go test -race ./...
-make fmt vet       # gofmt -w . && go vet ./...
+make test          # go test -race -tags goolm ./...
+make fmt vet       # gofmt -w . && go vet -tags goolm ./...
 ```
 
 Pokrycie: pełny przepływ rejestracji (token → formularz → zapis → duplikat →
@@ -314,5 +314,37 @@ lista rezerwowa → komplet), TTL i manipulacja tokenem, bramka czasowa i parsow
 bezpieczeństwa, tryb `-delete`, ładowanie kluczy oraz logika bota (allowlista
 pokojów, cache DM-ów, odpowiedzi przed otwarciem zapisów).
 
+Zwykłe `make test` używa wewnętrznego, in-memory fake'a transportu Matrix i
+**nie potrzebuje serwera** — jest hermetyczne i szybkie.
+
+### Test E2EE (prawdziwy Synapse)
+
+`make e2e` uruchamia integracyjny test szyfrowanego przepływu przeciw
+**prawdziwemu Synapse** w Dockerze (potrzebny Docker):
+
+```sh
+make e2e           # stawia Synapse, rejestruje userów bot+alice, odpala test, sprząta
+```
+
+Test (`test/e2e/e2e_test.go`, za build-tagami `e2e && goolm`) prowadzi
+**prawdziwego bota** (`matrixbot.NewMxClient` + `Client.Serve`, ten sam
+konstruktor co `cmd/bot`) i drugiego klienta „alice”: alice tworzy **szyfrowany**
+pokój, zaprasza bota, wysyła zaszyfrowane `!start`; bot je deszyfruje, buduje link
+rejestracyjny i odpowiada **zaszyfrowaną** wiadomością, którą alice deszyfruje —
+a token z linku jest dekodowany i weryfikowany (`Handle == @alice`, `Kind == reg`).
+Drugi przypadek powtarza to w pokoju **nieszyfrowanym** (brak regresji plaintext).
+Ręcznie, przeciw działającemu serwerowi:
+
+```sh
+bash scripts/e2e-synapse.sh up
+go test -tags 'e2e goolm' -run E2E -v ./test/e2e/...
+bash scripts/e2e-synapse.sh down
+```
+
+Bez serwera test **SKIP-uje** (nie failuje), więc nie blokuje deweloperów bez Dockera.
+
 CI (GitHub Actions, `.github/workflows`) uruchamia `gofmt -l`, `go vet`,
-`go build`, `go test -race` oraz build obrazu Dockera.
+`go build`, `go test -race` oraz build obrazu Dockera jako **wymagane** joby.
+Test E2EE z Synapse jest osobnym, **opcjonalnym** jobem `e2e`
+(`continue-on-error: true`, także `workflow_dispatch`) — bywa cięższy/flaky, więc
+nigdy nie blokuje merge'a; źródłem prawdy jest lokalne `make e2e`.

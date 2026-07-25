@@ -2,7 +2,7 @@ IMAGE       ?= dday:latest
 PORT        ?= 3329
 MATRIX_ENV  ?= matrix.env
 
-.PHONY: help run dev build docker up down logs fmt vet tidy test keys \
+.PHONY: help run dev build docker up down logs fmt vet tidy test e2e keys \
         check check-keys matrix-hello matrix-send bot
 
 help: ## Show this help
@@ -80,6 +80,16 @@ vet: ## Run go vet (with the bot's goolm E2EE build tag)
 
 test: ## Run the full test suite (race detector, goolm E2EE build tag)
 	go test -race -tags goolm ./...
+
+e2e: ## Run the E2EE round-trip test against a throwaway Synapse (needs Docker)
+	@./scripts/e2e-synapse.sh up
+	@echo "== running E2EE integration test =="
+	@set +e; \
+	 E2E_HOMESERVER=http://localhost:$${SYNAPSE_PORT:-8008} \
+	   go test -tags 'e2e goolm' -run E2E -count=1 -v ./test/e2e/...; \
+	 status=$$?; \
+	 ./scripts/e2e-synapse.sh down; \
+	 exit $$status
 
 tidy: ## Tidy modules
 	go mod tidy
