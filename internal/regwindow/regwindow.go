@@ -16,7 +16,7 @@ import (
 )
 
 // Environment variables overriding the built-in defaults. Each accepts either
-// RFC3339 ("2026-07-26T15:00:00+02:00") or the simpler "2006-01-02 15:04",
+// RFC3339 ("2026-10-31T15:00:00+01:00") or the simpler "2006-01-02 15:04",
 // which is interpreted in Europe/Warsaw. An unparseable value is logged and the
 // default is used — a typo must not take the site down.
 const (
@@ -27,9 +27,9 @@ const (
 
 // Defaults, used whenever the matching environment variable is unset or bad.
 var (
-	defaultOpenAt     = func() time.Time { return time.Date(2026, 7, 26, 15, 0, 0, 0, Warsaw()) }
-	defaultEventStart = func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, Warsaw()) }
-	defaultEventEnd   = func() time.Time { return time.Date(2026, 8, 8, 22, 0, 0, 0, Warsaw()) }
+	defaultOpenAt     = func() time.Time { return time.Date(2026, 10, 31, 15, 0, 0, 0, Warsaw()) }
+	defaultEventStart = func() time.Time { return time.Date(2026, 11, 7, 14, 0, 0, 0, Warsaw()) }
+	defaultEventEnd   = func() time.Time { return time.Date(2026, 11, 7, 22, 0, 0, 0, Warsaw()) }
 )
 
 // OpenAt is the instant registration opens (REGISTRATION_OPEN_AT).
@@ -106,7 +106,7 @@ func Warsaw() *time.Location {
 
 // Polish date vocabulary. Go has no locale support, so the small tables below
 // are the whole localisation: weekday names (nominative and accusative, the
-// latter for "w niedzielę …") plus months in the genitive ("26 lipca").
+// latter for "w sobotę …") plus months in the genitive ("31 października").
 var (
 	weekdays = [...]string{"niedziela", "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota"}
 	// weekdaysAcc is used after the preposition "w": "w niedzielę", "w sobotę".
@@ -118,7 +118,7 @@ var (
 
 func warsaw(t time.Time) time.Time { return t.In(Warsaw()) }
 
-// dayMonth renders "26 lipca".
+// dayMonth renders "31 października".
 func dayMonth(t time.Time) string {
 	t = warsaw(t)
 	return strconv.Itoa(t.Day()) + " " + monthsGen[int(t.Month())-1]
@@ -129,7 +129,7 @@ func hourMinute(t time.Time) string { return warsaw(t).Format("15:04") }
 
 // OpenStartText renders the registration start the way the "closed"/"expired"
 // pages and the bot's "not open yet" DM state it, e.g.
-// "niedziela 26 lipca 2026, 15:00 (czasu polskiego)".
+// "sobota 31 października 2026, 15:00 (czasu polskiego)".
 func OpenStartText() string {
 	t := warsaw(OpenAt())
 	return weekdays[int(t.Weekday())] + " " + dayMonth(t) + " " + strconv.Itoa(t.Year()) +
@@ -138,13 +138,13 @@ func OpenStartText() string {
 
 // OpenHowtoText renders the registration start for use after the preposition
 // "w", as the landing page's "Zapisy startują w …" line does, e.g.
-// "niedzielę 26 lipca, 15:00 czasu PL".
+// "sobotę 31 października, 15:00 czasu PL".
 func OpenHowtoText() string {
 	t := warsaw(OpenAt())
 	return weekdaysAcc[int(t.Weekday())] + " " + dayMonth(t) + ", " + hourMinute(t) + " czasu PL"
 }
 
-// OpenShort renders the "Zapisy od" tile headline, e.g. "Nd 26 lipca".
+// OpenShort renders the "Zapisy od" tile headline, e.g. "Sob 31 października".
 func OpenShort() string {
 	t := warsaw(OpenAt())
 	return weekdaysAbb[int(t.Weekday())] + " " + dayMonth(t)
@@ -154,14 +154,14 @@ func OpenShort() string {
 func OpenShortTime() string { return hourMinute(OpenAt()) + " czasu PL" }
 
 // EventText renders the event window in full, e.g.
-// "sobota 8 sierpnia 2026, 14:00–22:00".
+// "sobota 7 listopada 2026, 14:00–22:00".
 func EventText() string {
 	t := warsaw(EventStart())
 	return weekdays[int(t.Weekday())] + " " + dayMonth(t) + " " + strconv.Itoa(t.Year()) +
 		", " + hourMinute(t) + "–" + hourMinute(EventEnd())
 }
 
-// EventShort renders the "Kiedy" tile headline, e.g. "Sob, 8 sierpnia".
+// EventShort renders the "Kiedy" tile headline, e.g. "Sob, 7 listopada".
 func EventShort() string {
 	t := warsaw(EventStart())
 	return weekdaysAbb[int(t.Weekday())] + ", " + dayMonth(t)
@@ -170,7 +170,7 @@ func EventShort() string {
 // EventShortTime renders that tile's sub-line, e.g. "14:00 – 22:00".
 func EventShortTime() string { return hourMinute(EventStart()) + " – " + hourMinute(EventEnd()) }
 
-// EventBadge renders the header badge, e.g. "8 sierpnia 2026".
+// EventBadge renders the header badge, e.g. "7 listopada 2026".
 func EventBadge() string {
 	t := warsaw(EventStart())
 	return dayMonth(t) + " " + strconv.Itoa(t.Year())

@@ -49,9 +49,9 @@ func TestDefaults(t *testing.T) {
 		got  time.Time
 		when string
 	}{
-		{"OpenAt", OpenAt(), "2026-07-26 15:00"},
-		{"EventStart", EventStart(), "2026-08-08 14:00"},
-		{"EventEnd", EventEnd(), "2026-08-08 22:00"},
+		{"OpenAt", OpenAt(), "2026-10-31 15:00"},
+		{"EventStart", EventStart(), "2026-11-07 14:00"},
+		{"EventEnd", EventEnd(), "2026-11-07 22:00"},
 	}
 	for _, c := range want {
 		if got := c.got.In(Warsaw()).Format("2006-01-02 15:04"); got != c.when {
@@ -80,10 +80,10 @@ func TestParseFormats(t *testing.T) {
 // TestParseFallback asserts an unparseable value does not panic or zero the
 // date: it logs and keeps the default.
 func TestParseFallback(t *testing.T) {
-	for _, v := range []string{"not-a-date", "26.07.2026", "2026-13-45 99:99"} {
+	for _, v := range []string{"not-a-date", "31.10.2026", "2026-13-45 99:99"} {
 		t.Setenv(EnvOpenAt, v)
-		if got := OpenAt().Format("2006-01-02 15:04"); got != "2026-07-26 15:00" {
-			t.Errorf("REGISTRATION_OPEN_AT=%q → %s, want the default 2026-07-26 15:00", v, got)
+		if got := OpenAt().Format("2006-01-02 15:04"); got != "2026-10-31 15:00" {
+			t.Errorf("REGISTRATION_OPEN_AT=%q → %s, want the default 2026-10-31 15:00", v, got)
 		}
 	}
 }
@@ -115,24 +115,24 @@ func TestTextsFollowDates(t *testing.T) {
 // TestDefaultTexts pins the wording produced for the built-in dates — the exact
 // strings the pre-refactor constant carried.
 func TestDefaultTexts(t *testing.T) {
-	if got, want := OpenStartText(), "niedziela 26 lipca 2026, 15:00 (czasu polskiego)"; got != want {
+	if got, want := OpenStartText(), "sobota 31 października 2026, 15:00 (czasu polskiego)"; got != want {
 		t.Errorf("OpenStartText() = %q, want %q", got, want)
 	}
-	if got, want := EventText(), "sobota 8 sierpnia 2026, 14:00–22:00"; got != want {
+	if got, want := EventText(), "sobota 7 listopada 2026, 14:00–22:00"; got != want {
 		t.Errorf("EventText() = %q, want %q", got, want)
 	}
-	if got, want := OpenShort(), "Nd 26 lipca"; got != want {
+	if got, want := OpenShort(), "Sob 31 października"; got != want {
 		t.Errorf("OpenShort() = %q, want %q", got, want)
 	}
-	if got, want := EventShort(), "Sob, 8 sierpnia"; got != want {
+	if got, want := EventShort(), "Sob, 7 listopada"; got != want {
 		t.Errorf("EventShort() = %q, want %q", got, want)
 	}
-	if got, want := EventBadge(), "8 sierpnia 2026"; got != want {
+	if got, want := EventBadge(), "7 listopada 2026"; got != want {
 		t.Errorf("EventBadge() = %q, want %q", got, want)
 	}
 	// Accusative day name after "w" — grammatically different from the
 	// nominative used in OpenStartText.
-	if got := OpenHowtoText(); !strings.HasPrefix(got, "niedzielę ") {
+	if got := OpenHowtoText(); !strings.HasPrefix(got, "sobotę ") {
 		t.Errorf("OpenHowtoText() = %q, want an accusative weekday prefix", got)
 	}
 }
@@ -156,14 +156,15 @@ func TestAllWeekdaysAndMonths(t *testing.T) {
 	}
 }
 
-func TestWarsawIsCEST(t *testing.T) {
+func TestWarsawIsCET(t *testing.T) {
 	loc := Warsaw()
 	if loc == nil {
 		t.Fatal("Warsaw() returned nil")
 	}
-	// The default OpenAt is in summer, so the offset must be +02:00 (7200s).
+	// The default OpenAt (31 October 2026) falls after the DST switch on
+	// 25 October, so the offset must be CET +01:00 (3600s).
 	_, offset := OpenAt().Zone()
-	if offset != 2*60*60 {
-		t.Errorf("OpenAt() offset = %ds, want 7200s", offset)
+	if offset != 1*60*60 {
+		t.Errorf("OpenAt() offset = %ds, want 3600s", offset)
 	}
 }

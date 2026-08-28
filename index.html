@@ -7,9 +7,9 @@
 <!-- The two description tags below are static (crawlers do not run our JS), so
      they are the ONE place a date change must still be edited by hand — see
      "Zmiana terminu wydarzenia" in README.md. -->
-<meta name="description" content="D-Day — unconference w Hakierspejsie w Łodzi. Sobota 8 sierpnia 2026, 14:00–22:00. Wstęp darmowy, zapisy obowiązkowe.">
+<meta name="description" content="D-Day — unconference w Hakierspejsie w Łodzi. Sobota 7 listopada 2026, 14:00–22:00. Wstęp darmowy, zapisy obowiązkowe.">
 <meta property="og:title" content="D-Day · Unconference · Hakierspejs Łódź">
-<meta property="og:description" content="Sobota 8 sierpnia 2026, 14:00–22:00. Zielona 30 LU3, Łódź. Wstęp darmowy, zapisy obowiązkowe.">
+<meta property="og:description" content="Sobota 7 listopada 2026, 14:00–22:00. Zielona 30 LU3, Łódź. Wstęp darmowy, zapisy obowiązkowe.">
 <meta property="og:type" content="website">
 <!-- Relative href on purpose: the page must also work as a static file
      (GitHub Pages under /dday/, and over file://). -->
@@ -22,7 +22,7 @@
         <h1>D-Day</h1>
         <span class="sub">Unconference · Hakierspejs Łódź</span>
       </div>
-      <span class="badge" id="event-badge">8 sierpnia 2026</span>
+      <span class="badge" id="event-badge">7 listopada 2026</span>
     </header>
 
     <!-- Every date on this page is a FALLBACK only, used when /api/count is
@@ -59,14 +59,14 @@
         <li>Bot odeśle Ci prywatny link do formularza (miejscowość + e-mail).</li>
         <li>Wypełnij formularz — dostaniesz swój numer uczestnika.</li>
       </ol>
-      <p class="limit" id="howto-limit">20 miejsc podstawowych + 20 na liście rezerwowej. Zapisy startują w niedzielę 26 lipca, 15:00 czasu PL.</p>
+      <p class="limit" id="howto-limit">20 miejsc podstawowych + 20 na liście rezerwowej. Zapisy startują w sobotę 31 października, 15:00 czasu PL.</p>
     </section>
 
     <section class="meta">
-      <div class="cell"><div class="k">Kiedy</div><div class="v" id="when-date">Sob, 8 sierpnia<small id="when-time">14:00 – 22:00</small></div></div>
+      <div class="cell"><div class="k">Kiedy</div><div class="v" id="when-date">Sob, 7 listopada<small id="when-time">14:00 – 22:00</small></div></div>
       <div class="cell"><div class="k">Gdzie</div><div class="v">Hakierspejs<small>Zielona 30 LU3, Łódź</small></div></div>
       <div class="cell"><div class="k">Wstęp</div><div class="v">Darmowy<small>zapisy obowiązkowe</small></div></div>
-      <div class="cell" id="regfrom"><div class="k">Zapisy od</div><div class="v" id="regfrom-date">Nd 26 lipca<small id="regfrom-time">15:00 czasu PL</small></div></div>
+      <div class="cell" id="regfrom"><div class="k">Zapisy od</div><div class="v" id="regfrom-date">Sob 31 października<small id="regfrom-time">15:00 czasu PL</small></div></div>
     </section>
 
     <div class="foot">
@@ -84,11 +84,11 @@
   // overwrites both, so the dates live in exactly one place (env
   // REGISTRATION_OPEN_AT / EVENT_START_AT / EVENT_END_AT). These literals keep
   // the page correct on static hosting (e.g. GitHub Pages) where no API exists.
-  //   REG_OPEN — registration opens: niedziela 26 lipca 2026, 15:00 Europe/Warsaw
-  //   EVENT    — D-Day starts:        sobota   8 sierpnia 2026, 14:00 Europe/Warsaw
-  // Both moments fall in CEST (UTC+2), so the UTC instants are 2h earlier.
-  var REG_OPEN = Date.UTC(2026, 6, 26, 13, 0, 0); // 15:00 Warsaw == 13:00 UTC
-  var EVENT    = Date.UTC(2026, 7,  8, 12, 0, 0); // 14:00 Warsaw == 12:00 UTC
+  //   REG_OPEN — registration opens: sobota 31 października 2026, 15:00 Europe/Warsaw
+  //   EVENT    — D-Day starts:       sobota  7 listopada    2026, 14:00 Europe/Warsaw
+  // Both moments fall in CET (UTC+1), so the UTC instants are 1h earlier.
+  var REG_OPEN = Date.UTC(2026, 9, 31, 14, 0, 0); // 15:00 Warsaw == 14:00 UTC
+  var EVENT    = Date.UTC(2026, 10, 7, 13, 0, 0); // 14:00 Warsaw == 13:00 UTC
 
   // apiOpen stays null until /api/count answers, then holds its `open` flag.
   // Once the API has ever answered it WINS over the local clock: the server is

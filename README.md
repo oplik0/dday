@@ -2,10 +2,10 @@
 
 Strona i system zapisów na unconference **D-Day** w Hakierspejsie w Łodzi.
 
-- **Kiedy:** sobota 8 sierpnia 2026, 14:00–22:00
+- **Kiedy:** sobota 7 listopada 2026, 14:00–22:00
 - **Gdzie:** Hakierspejs, Zielona 30 LU3, Łódź
 - **Wstęp:** darmowy, zapisy obowiązkowe (20 miejsc + 20 na liście rezerwowej)
-- **Zapisy startują:** niedziela 26 lipca 2026, 15:00 czasu polskiego
+- **Zapisy startują:** sobota 31 października 2026, 15:00 czasu polskiego
 
 Powyższe daty to wartości domyślne — wszystkie są konfigurowalne przez zmienne
 środowiskowe, patrz [Zmiana terminu wydarzenia](#zmiana-terminu-wydarzenia).
@@ -142,9 +142,9 @@ Serwer WWW:
 | `INTERNAL_TOKEN` | *(puste)* | bearer chroniący `/api/registered` i `/api/registrations`; puste = endpointy wyłączone (404) |
 | `ADMIN_TOKEN` | *(puste)* | token chroniący `/admin`; puste = panel admina wyłączony (404) |
 | `REGISTRATION_OPEN` | *(puste)* | **opcjonalny override do testów**: `1`/`true`/`yes` wymusza otwarte zapisy, `0` wymusza zamknięte, brak/puste = automat wg `REGISTRATION_OPEN_AT` |
-| `REGISTRATION_OPEN_AT` | `2026-07-26 15:00` | moment otwarcia zapisów |
-| `EVENT_START_AT` | `2026-08-08 14:00` | początek wydarzenia |
-| `EVENT_END_AT` | `2026-08-08 22:00` | koniec wydarzenia |
+| `REGISTRATION_OPEN_AT` | `2026-10-31 15:00` | moment otwarcia zapisów |
+| `EVENT_START_AT` | `2026-11-07 14:00` | początek wydarzenia |
+| `EVENT_END_AT` | `2026-11-07 22:00` | koniec wydarzenia |
 
 Bot Matrix (`cmd/bot`, konfiguracja zwykle w `matrix.env`):
 
@@ -168,7 +168,7 @@ Bot Matrix (`cmd/bot`, konfiguracja zwykle w `matrix.env`):
 | `CRYPTO_PICKLE_KEY` | *(puste)* | klucz szyfrujący konto olm w spoczynku; **musi być stały** — z tym samym `CRYPTO_DB_PATH` utrzymuje urządzenie i sesje między restartami. Puste = generowany efemerycznie z ostrzeżeniem (restart gubi wszystkie sesje) |
 | `REGISTRATION_OPEN`, `REGISTRATION_OPEN_AT` | jak wyżej | bot używa tej samej bramki i tego samego opisu daty |
 
-Formaty dat (`*_AT`): RFC3339 (`2026-07-26T15:00:00+02:00`) albo
+Formaty dat (`*_AT`): RFC3339 (`2026-10-31T15:00:00+01:00`) albo
 `2006-01-02 15:04` / `2006-01-02 15:04:05` / `2006-01-02` interpretowane w strefie
 Europe/Warsaw. Wartość niepoprawna → wpis w logu i użycie domyślnej (bez crasha).
 
@@ -322,7 +322,7 @@ sekund powinien wrócić (zaszyfrowany) link `…/register?t=…`.
 ## Automatyczne otwarcie zapisów
 
 **Nie trzeba nic robić ręcznie w momencie startu zapisów.** Rejestracja otwiera
-się sama o `REGISTRATION_OPEN_AT` (domyślnie `2026-07-26 15:00` czasu polskiego):
+się sama o `REGISTRATION_OPEN_AT` (domyślnie `2026-10-31 15:00` czasu polskiego):
 
 - **Serwer WWW** liczy bramkę `regwindow.Open()` przy **każdym żądaniu**, więc
   `/register` i `/api/count` przełączają się w tej samej sekundzie — bez
@@ -364,8 +364,8 @@ Terminy pochodzą wyłącznie z `internal/regwindow`: serwer używa ich na stron
 „zapisy nieotwarte", bot w odpowiedzi „jeszcze nie wystartowały", a landing
 pobiera je z `/api/count` (`openAt`, `eventStartAt`, `eventEndAt` + gotowe polskie
 teksty `openText`, `openHowto`, `openShort`, `openShortTime`, `eventText`,
-`eventShort`, `eventShortTime`, `eventBadge`). Polskie odmiany („niedziela”,
-„lipca”, „w niedzielę”) generuje sam pakiet — nic nie synchronizuje się ręcznie.
+`eventShort`, `eventShortTime`, `eventBadge`). Polskie odmiany („sobota”,
+„października”, „w sobotę”) generuje sam pakiet — nic nie synchronizuje się ręcznie.
 
 Żeby przesunąć termin, ustaw w `.env` (deployment) albo w środowisku procesu:
 
